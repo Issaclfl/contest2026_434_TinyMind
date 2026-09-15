@@ -1,0 +1,47 @@
+--- a/src/sifli_ap.c
++++ b/src/sifli_ap.c
+@@ -58,6 +58,12 @@
+ #    include <nuttx/spi/spi_transfer.h>
+ #  endif
+ #endif
++#ifdef CONFIG_AUDIO
++#  include <nuttx/kmalloc.h>
++#  include <nuttx/audio/audio.h>
++#  include "bsp_audio.h"
++#endif
++
+ #if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
+   defined(CONFIG_BSP_USING_SPI1)
+ #  include <nuttx/mmcsd.h>
+@@ -461,6 +467,31 @@
+     }
+ #endif
+ 
++#ifdef CONFIG_AUDIO
++  /* SF32LB52 on-chip audio codec: onboard analog mic in, speaker out
++   * through the Class-D PA (enable on PA10).  Register as /dev/audio0. */
++
++  FAR struct audio_lowerhalf_s *audio = sf32lb52_audio_initialize();
++  if (audio == NULL)
++    {
++      syslog(LOG_ERR, "ERROR: sf32lb52_audio_initialize failed\n");
++    }
++  else
++    {
++      ret = audio_register("/dev/audio0", audio);
++      if (ret < 0)
++        {
++          syslog(LOG_ERR, "ERROR: audio_register(/dev/audio0) failed: %d\n",
++                 ret);
++          kmm_free(audio);
++        }
++      else
++        {
++          syslog(LOG_INFO, "audio: /dev/audio0 registered\n");
++        }
++    }
++#endif
++
+ #ifdef CONFIG_I2C
+   /* Initialize I2C bus 0 on the touch panel pins. */
+   struct i2c_master_s *i2c0 = NULL;

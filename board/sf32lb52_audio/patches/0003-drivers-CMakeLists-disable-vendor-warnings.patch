@@ -1,0 +1,16 @@
+--- a/drivers/CMakeLists.txt
++++ b/drivers/CMakeLists.txt
+@@ -23,6 +23,13 @@
+ 										   HAL_TICK_PER_SECOND=1000
+ 										   USE_HAL_DRIVER)
+ 
++# Vendor code carries legacy C declarations (e.g. no-prototype prototypes in
++# bf0_hal_audcodec.h) that trip -Werror under newer host toolchains.  Match
++# the chip HAL convention of building vendor sources with warnings disabled.
++target_compile_options(drivers PRIVATE
++					   $<$<COMPILE_LANGUAGE:C>:-w>
++					   $<$<COMPILE_LANGUAGE:CXX>:-w>)
++
+ target_include_directories(drivers PRIVATE ${NUTTX_CHIP_ABS_DIR}
+ 										   ${NUTTX_CHIP_ABS_DIR}/include
+ 										   ${NUTTX_CHIP_ABS_DIR}/../drivers/Include
