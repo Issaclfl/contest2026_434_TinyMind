@@ -43,7 +43,7 @@ board/sf32lb52_audio/
 
 ---
 
-## 三、编译与运行
+## 三、编译、烧录与验证
 
 ```bash
 # 1) 拉取工程（组委会提供）
@@ -54,14 +54,50 @@ repo sync -c -j8
 # 2) 落盘 4 个生产树改动（驱动源文件由 manifest 的 <linkfile> 自动就位）
 bash contest2026_434_TinyMind/board/sf32lb52_audio/apply.sh
 
-# 3) 编译
-./build.sh vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/configs/nsh
+# 3) 编译（openvela 标准流程：envsetup + lunch + m）
+source build/envsetup.sh
+lunch vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/configs/nsh
+m -j8
+# 产物：out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin
 
-# 4) 烧录
-out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin
+# 4) 烧录（ROM bootloader + XIP 镜像 @ 0x12010000，无独立 bootloader）
+sftool -c SF32LB52 -p /dev/ttyUSB0 -b 1000000 \
+       --before default_reset --after soft_reset \
+       write_flash out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin@0x12010000
+
+# 5) 串口控制台（UART1，1000000 8N1，关流控）
+#    注意：本板 RTS 接 VCC 负载开关，screen / cu 会让芯片一直停在复位态
+picocom -b 1000000 --noreset --lower-rts --lower-dtr /dev/ttyUSB0
 ```
 
-**验证成功的标志**：串口进入 NSH 后执行 `ls /dev`，能看到 `audio0`。
+### 验证成功的标志
+
+```text
+nsh> ls /dev
+/dev:
+ adc0      buttons   config0   console   fb0       gpio0     gpio1
+ audio0    gpio2     i2c0      input0    lcd0      pwm0      ram0
+ rtc0      spi1      timer0    ttyACM0   ttyS0     ttyS1     urandom
+ watchdog0
+```
+
+`audio0` 出现 = M1（框架接入）在真机生效。
+
+进一步验证 M2（硬件真的被配置）：
+
+```text
+nsh> nxrecorder
+nxrecorder> open
+nxrecorder> record
+```
+
+驱动会打印硬件配置与上电时序日志（`capture config: 16000Hz 1ch 16bit`、
+`capture started (dma=gated)`），证明 `configure()`/`start()` 已作用于 AUDCODEC/AUDPRC 寄存器。
+数据通路接通前（M3 未完成），录音取数会以 `-ENOSYS` 干净失败——这是预期行为。
+
+> **烧录常见问题**：`Failed to connect to the chip` 说明 SoC 错过了 RTS 复位后约 2 秒的
+> `ATSF32` 监听窗口，重新插拔 USB 或按板载 Reset 键重试。
+
 
 ---
 
@@ -74,7 +110,7 @@ out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin
 |------|------|------|
 | `src/CMakeLists.txt` | `SRCS` 追加 `bsp_audio.c bsp_audio_hw.c` | 让驱动进编译 |
 | `drivers/CMakeLists.txt` | 新增 `target_compile_options(... -w)` | 厂商 HAL 头（`bf0_hal_audcodec.h`）含无原型声明，新版工具链 `-Werror` 下编译失败 |
-| `configs/nsh/defconfig` | 新增 `CONFIG_AUDIO=y` | 启用 NuttX 音频框架 |
+| `configs/nsh/defconfig` | 新增 `CONFIG_AUDIO=y`、`CONFIG_SYSTEM_NXRECORDER=y` | 启用音频框架；并启用 NuttX 自带 `nxrecorder` 作为真机验证工具 |
 | `src/sifli_ap.c` | 新增 include + `audio_register("/dev/audio0", ...)` | 启动时注册设备节点 |
 
 `apply.sh` 以**文件覆盖**而非 `patch` 方式落盘，避免上下文偏移导致应用失败；`patches/` 同时提供标准 diff 便于评审审阅。
