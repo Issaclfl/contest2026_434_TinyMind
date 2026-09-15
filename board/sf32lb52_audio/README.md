@@ -132,6 +132,32 @@ nxrecorder> record
 
 ## 六、当前完成度（诚实说明）
 
+### 6.1 已实测验证的结果
+
+在 `dev-ai-contest-2026` 分支、`arm-none-eabi-gcc 13.2.1` 下，全新配置完整构建：
+
+```text
+#### build completed successfully (01:26 (mm:ss)) ####
+
+Memory region         Used Size  Region Size  %age Used
+           flash:     1449172 B        16 MB      8.64%
+            sram:       72192 B       512 KB     13.77%
+           psram:           0 B         8 MB      0.00%
+```
+
+驱动符号确认已链接进固件（`out/sifli_sf32lb52_devkit_lcd_nsh/System.map`）：
+
+| 符号 | 含义 |
+|------|------|
+| `sf32lb52_audio_initialize` | 驱动实例化入口 |
+| `sf32lb52_getcaps` | 能力查询回调 |
+| `sf32lb52_configure` | 格式配置回调 |
+| `sf32lb52_audio_hw_init` | 硬件上电入口 |
+| `audio_register` | NuttX 设备注册 |
+| `nxrecorder_main` | 验证工具（NuttX 自带） |
+
+### 6.2 阶段完成度
+
 | 阶段 | 内容 | 状态 |
 |------|------|------|
 | M1 | 框架接入：函数表 + `/dev/audio0` 注册 | ✅ 完成 |

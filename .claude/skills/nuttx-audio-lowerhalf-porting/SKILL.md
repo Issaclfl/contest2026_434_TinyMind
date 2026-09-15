@@ -144,6 +144,54 @@ audio_register("/dev/audio0", audio);
 
 ---
 
+## 附一：构建环境三个坑（都会让编译直接失败）
+
+openvela 的 CMake 配置阶段对 PATH 很敏感，而项目常把工具链装在工作区之外：
+
+1. **ARM 工具链**：`find_program` 找不到时只在链接期报
+   `/bin/sh: 1: arm-none-eabi-ar: not found`——**报错很晚，容易误判成代码问题**。
+   先 `which arm-none-eabi-gcc arm-none-eabi-ar` 确认。
+
+2. **kconfiglib 的 `olddefconfig`**：`nuttx/CMakeLists.txt` 用
+   `find_program(KCONFIGLIB olddefconfig)` 检测，找不到就 `FATAL_ERROR`。
+   该可执行文件由 `pip install kconfiglib` 装到 `~/.local/bin`，
+   **而 `~/.local/bin` 常不在 PATH 里**。报错文案只说"请安装 kconfiglib"，
+   但模块其实已装好——是 PATH 问题，容易误诊。
+
+3. **非交互 shell / `bash script.sh` 不加载 `.bashrc`**：上述两个路径都靠 `.bashrc` 提供，
+   批量脚本里必须显式 `export PATH=...`。
+
+```bash
+export PATH="$HOME/.local/bin:$HOME/<toolchain-root>/bin:$PATH"
+which arm-none-eabi-gcc arm-none-eabi-ar olddefconfig
+```
+
+## 附二：改 Kconfig/defconfig 后配置不生效
+
+**症状**：改了 defconfig，`grep CONFIG_XXX out/<board>_<config>/.config` 仍是
+`not set`，且产物大小与改动前**完全相同**。
+
+**原因**：增量构建复用 `out/.../.config`，**不会重新读取 defconfig**。
+
+**处理**：删掉构建目录后重新配置。
+
+```bash
+rm -rf out/<board>_<config>
+lunch <board-config-path>
+m -j8
+```
+
+**验证配置真的生效**（不要只看编译成功）：
+
+```bash
+grep CONFIG_<你的符号> out/<board>_<config>/.config
+grep -c "<你的函数名>" out/<board>_<config>/System.map   # 符号进没进固件
+```
+
+后者尤为关键：它证明**你写的代码真的被链接进了固件**，而不只是"编译没报错"。
+
+---
+
 ## 附：在非 git 工作树里找出全部改动文件
 
 openvela 的 `repo` 工作区若没有 `.repo`（或不是 git 仓），无法用 `git status` 审出改动。
