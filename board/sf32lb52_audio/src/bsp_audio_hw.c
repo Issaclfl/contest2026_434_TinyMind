@@ -45,6 +45,8 @@
 #include <debug.h>
 
 #include <nuttx/arch.h>
+#include <nuttx/irq.h>
+#include <nuttx/cache.h>
 
 #include "bf0_hal.h"            /* HAL_Delay_us, PMU/RCC/DMA HAL, hwp_* */
 #include "drv_io.h"             /* BSP_GPIO_Set */
@@ -111,6 +113,21 @@ static DMA_HandleTypeDef g_codec_hdma[HAL_AUDCODEC_INSTANC_CNT];
 static bool g_hw_ready;
 static bool g_stream_on[2];
 static int  g_mic_gain_db = SF32LB52_MIC_GAIN_DEFAULT_DB;
+
+/* Streaming state (M3).
+ *
+ * g_stage is the circular DMA target for both directions: two halves of
+ * SF32LB52_AUDIO_STAGE_BYTES, one upper-half buffer each.  It is a private
+ * buffer rather than the caller's ap_buffer data area so that alignment and
+ * D-cache maintenance stay contained in this file - see bsp_audio_hw.h.
+ */
+
+static uint8_t g_stage[SF32LB52_AUDIO_STAGE_HALVES *
+                       SF32LB52_AUDIO_STAGE_BYTES]
+  __attribute__((aligned(SF32LB52_AUDIO_DMA_ALIGN)));
+
+static sf32lb52_audio_stage_cb_t g_stage_cb;
+static bool g_dma_on[2];
 
 /* Codec ADC clock table (48MHz XTAL family).
  * Fields: samplerate, clk_src_sel, clk_div, osr_sel, sel_clk_adc_source,
@@ -250,6 +267,14 @@ static void hw_prc_path_defaults(void)
 
   memset(dac, 0, sizeof(*dac));
   dac->dst_sel = AUDPRC_TX_TO_CODEC;      /* DAC path to codec */
+
+  /* The HAL keys the AUDPRC DMA mode off this handle field: anything other
+   * than AUDPRC_TX_TO_MEM selects circular mode plus the half-complete
+   * handler (bf0_hal_audprc.c:796), which is exactly what the two-half
+   * staging scheme depends on.  Set it explicitly instead of relying on the
+   * zero-fill matching AUDPRC_TX_TO_CODEC by accident. */
+
+  g_audprc.dest_sel = AUDPRC_TX_TO_CODEC;
   dac->mixrsrc1 = 5;                      /* mixer right aux: silence */
   dac->mixrsrc0 = 1;                      /* mixer right main: TX ch0 */
   dac->mixlsrc1 = 5;                      /* mixer left aux: silence */
@@ -285,6 +310,135 @@ static int hw_set_prc_clock(uint32_t samprate)
   __HAL_AUDPRC_CLK_XTAL(&g_audprc);
   __HAL_AUDPRC_STB_DIV_CLK(&g_audprc, div->div, div->div);
   return OK;
+}
+
+/****************************************************************************
+ * Streaming plumbing (M3)
+ *
+ * Interrupt path:
+ *   DMAC IRQ -> hw_{rx,tx}_dma_isr -> HAL_DMA_IRQHandler
+ *            -> AUDPRC_DMARxCplt / AUDPRC_DMATxCplt   (set up by the HAL)
+ *            -> HAL_AUDPRC_Rx{Cplt,HalfCplt}Callback  (weak, overridden here)
+ *            -> g_stage_cb(dir, half)
+ *
+ * Because dest_sel stays AUDPRC_TX_TO_CODEC the HAL runs the DMA in circular
+ * mode and installs the half-complete handler, so a two-half staging area
+ * yields one interrupt per upper-half buffer in both directions.
+ ****************************************************************************/
+
+static void hw_stage_clean(uint8_t half)
+{
+  FAR uint8_t *p = &g_stage[half * SF32LB52_AUDIO_STAGE_BYTES];
+
+  up_clean_dcache((uintptr_t)p,
+                  (uintptr_t)p + SF32LB52_AUDIO_STAGE_BYTES);
+}
+
+static void hw_stage_invalidate(uint8_t half)
+{
+  FAR uint8_t *p = &g_stage[half * SF32LB52_AUDIO_STAGE_BYTES];
+
+  up_invalidate_dcache((uintptr_t)p,
+                       (uintptr_t)p + SF32LB52_AUDIO_STAGE_BYTES);
+}
+
+/* Capture: the ADC has just filled `half`, so the CPU's view is stale.
+ * Invalidate before handing it up, then notify (runs in interrupt context).
+ */
+
+static void hw_capture_half_ready(uint8_t half)
+{
+  hw_stage_invalidate(half);
+
+  if (g_stage_cb != NULL)
+    {
+      g_stage_cb(SF32LB52_AUDIO_CAPTURE, half);
+    }
+}
+
+/* Playback: the callee has just refilled `half`, so push it out of the
+ * D-cache before the DMA reads it again (a full half-transfer away, but the
+ * clean has to happen after the refill, not before).
+ */
+
+static void hw_playback_half_drained(uint8_t half)
+{
+  if (g_stage_cb != NULL)
+    {
+      g_stage_cb(SF32LB52_AUDIO_PLAYBACK, half);
+    }
+
+  hw_stage_clean(half);
+}
+
+static int hw_rx_dma_isr(int irq, FAR void *context, FAR void *arg)
+{
+  HAL_DMA_IRQHandler(&g_audprc_hdma_rx);
+  return OK;
+}
+
+static int hw_tx_dma_isr(int irq, FAR void *context, FAR void *arg)
+{
+  HAL_DMA_IRQHandler(&g_audprc_hdma_tx);
+  return OK;
+}
+
+/* NuttX IRQ numbers are offset by the 16 Cortex-M system exceptions. */
+
+static void hw_dma_irq_attach(uint8_t dir)
+{
+  if (dir == SF32LB52_AUDIO_CAPTURE)
+    {
+      irq_attach(AUDPRC_RX0_DMA_IRQ + 16, hw_rx_dma_isr, NULL);
+      up_enable_irq(AUDPRC_RX0_DMA_IRQ + 16);
+    }
+  else
+    {
+      irq_attach(AUDPRC_TX0_DMA_IRQ + 16, hw_tx_dma_isr, NULL);
+      up_enable_irq(AUDPRC_TX0_DMA_IRQ + 16);
+    }
+}
+
+static void hw_dma_irq_detach(uint8_t dir)
+{
+  if (dir == SF32LB52_AUDIO_CAPTURE)
+    {
+      up_disable_irq(AUDPRC_RX0_DMA_IRQ + 16);
+      irq_detach(AUDPRC_RX0_DMA_IRQ + 16);
+    }
+  else
+    {
+      up_disable_irq(AUDPRC_TX0_DMA_IRQ + 16);
+      irq_detach(AUDPRC_TX0_DMA_IRQ + 16);
+    }
+}
+
+/****************************************************************************
+ * HAL callbacks
+ *
+ * The HAL sets AUDPRC_DMARxCplt / AUDPRC_DMATxCplt as the DMA transfer
+ * callbacks and those call these weak functions; overriding them here is the
+ * documented user hook (bf0_hal_audprc.c:854..).
+ ****************************************************************************/
+
+void HAL_AUDPRC_RxHalfCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
+{
+  hw_capture_half_ready(0);
+}
+
+void HAL_AUDPRC_RxCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
+{
+  hw_capture_half_ready(1);
+}
+
+void HAL_AUDPRC_TxHalfCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
+{
+  hw_playback_half_drained(0);
+}
+
+void HAL_AUDPRC_TxCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
+{
+  hw_playback_half_drained(1);
 }
 
 /****************************************************************************
@@ -535,6 +689,16 @@ int sf32lb52_audio_hw_start(uint8_t dir, uint8_t *buf, uint32_t len)
       return -EAGAIN;
     }
 
+  /* The DMA always runs against the internal staging area, so the caller's
+   * buffer geometry is only ever asserted, never used as the DMA target. */
+
+  if (len != 0 && len != SF32LB52_AUDIO_STAGE_BYTES)
+    {
+      _err("buffer size %lu != staging %u\n", (unsigned long)len,
+           (unsigned)SF32LB52_AUDIO_STAGE_BYTES);
+      return -EINVAL;
+    }
+
   if (dir == SF32LB52_AUDIO_CAPTURE)
     {
       /* SDK start_rx order: codec analog path first (MICBIAS settle 20ms),
@@ -545,38 +709,47 @@ int sf32lb52_audio_hw_start(uint8_t dir, uint8_t *buf, uint32_t len)
       __HAL_AUDCODEC_ADC_ENABLE(&g_audcodec);
       __HAL_AUDPRC_ADCPATH_ENABLE(&g_audprc);
 
-      if (buf != NULL && len > 0)
+      /* Flush the staging area before handing it to the DMA: the ADC writes
+       * into it behind the CPU's back, and any dirty line left in the D-cache
+       * would be written back over captured audio. */
+
+      up_flush_dcache((uintptr_t)g_stage,
+                      (uintptr_t)g_stage + sizeof(g_stage));
+
+      ret = HAL_AUDPRC_Receive_DMA(&g_audprc, g_stage, sizeof(g_stage),
+                                   HAL_AUDPRC_RX_CH0);
+      if (ret != HAL_OK)
         {
-          ret = HAL_AUDPRC_Receive_DMA(&g_audprc, buf, len,
-                                       HAL_AUDPRC_RX_CH0);
-          if (ret != HAL_OK)
-            {
-              _err("Receive_DMA failed: %d\n", ret);
-              return -EIO;
-            }
+          _err("Receive_DMA failed: %d\n", ret);
+          return -EIO;
         }
 
+      hw_dma_irq_attach(SF32LB52_AUDIO_CAPTURE);
       __HAL_AUDPRC_ENABLE(&g_audprc);     /* AUDPRC total enable, last */
 
       g_stream_on[SF32LB52_AUDIO_CAPTURE] = true;
-      _info("capture started (dma=%s)\n", buf != NULL ? "on" : "gated");
+      g_dma_on[SF32LB52_AUDIO_CAPTURE] = true;
+      _info("capture started (staging %u B, circular)\n",
+            (unsigned)sizeof(g_stage));
       return OK;
     }
 
   if (dir == SF32LB52_AUDIO_PLAYBACK)
     {
-      if (buf == NULL || len == 0)
-        {
-          return -EINVAL;
-        }
-
       /* SDK start_tx order (anti-pop):
        * mute -> AUDPRC (ch cfg + DMA + enable) -> codec digital enable ->
-       * DAC analog stepwise power-up -> 10ms -> PA -> 100ms -> unmute. */
+       * DAC analog stepwise power-up -> 10ms -> PA -> 100ms -> unmute.
+       *
+       * The staging halves were filled by the stage callback before start,
+       * so the DAC has valid frames queued while the analog path settles;
+       * the unmute at the end is what makes them audible. */
 
       HAL_AUDCODEC_Config_DACPath(&g_audcodec, 1);        /* muted */
 
-      ret = HAL_AUDPRC_Transmit_DMA(&g_audprc, buf, len,
+      up_flush_dcache((uintptr_t)g_stage,
+                      (uintptr_t)g_stage + sizeof(g_stage));
+
+      ret = HAL_AUDPRC_Transmit_DMA(&g_audprc, g_stage, sizeof(g_stage),
                                     HAL_AUDPRC_TX_CH0);
       if (ret != HAL_OK)
         {
@@ -584,6 +757,7 @@ int sf32lb52_audio_hw_start(uint8_t dir, uint8_t *buf, uint32_t len)
           return -EIO;
         }
 
+      hw_dma_irq_attach(SF32LB52_AUDIO_PLAYBACK);
       __HAL_AUDPRC_ENABLE(&g_audprc);
 
       __HAL_AUDCODEC_DAC_ENABLE(&g_audcodec);
@@ -598,7 +772,9 @@ int sf32lb52_audio_hw_start(uint8_t dir, uint8_t *buf, uint32_t len)
       HAL_AUDCODEC_Config_DACPath(&g_audcodec, 0);        /* unmute */
 
       g_stream_on[SF32LB52_AUDIO_PLAYBACK] = true;
-      _info("playback started\n");
+      g_dma_on[SF32LB52_AUDIO_PLAYBACK] = true;
+      _info("playback started (staging %u B, circular)\n",
+            (unsigned)sizeof(g_stage));
       return OK;
     }
 
@@ -621,6 +797,9 @@ int sf32lb52_audio_hw_stop(uint8_t dir)
       /* Reverse of start: AUDPRC first, then codec digital, then analog. */
 
       HAL_AUDPRC_DMAStop(&g_audprc, HAL_AUDPRC_RX_CH0);
+      hw_dma_irq_detach(SF32LB52_AUDIO_CAPTURE);
+      g_dma_on[SF32LB52_AUDIO_CAPTURE] = false;
+
       __HAL_AUDPRC_ADCPATH_DISABLE(&g_audprc);
       __HAL_AUDPRC_DISABLE(&g_audprc);
       HAL_AUDPRC_Clear_Adc_Channel(&g_audprc);
@@ -650,6 +829,8 @@ int sf32lb52_audio_hw_stop(uint8_t dir)
       HAL_AUDCODEC_Config_DACPath(&g_audcodec, 1);      /* mute */
 
       HAL_AUDCODEC_DMAStop(&g_audprc, HAL_AUDPRC_TX_CH0);
+      hw_dma_irq_detach(SF32LB52_AUDIO_PLAYBACK);
+      g_dma_on[SF32LB52_AUDIO_PLAYBACK] = false;
 
       HAL_AUDCODEC_Close_Analog_DACPath();
       __HAL_AUDCODEC_DAC_DISABLE(&g_audcodec);
@@ -666,6 +847,30 @@ int sf32lb52_audio_hw_stop(uint8_t dir)
     }
 
   return -EINVAL;
+}
+
+/****************************************************************************
+ * Name: sf32lb52_audio_hw_set_stage_callback
+ ****************************************************************************/
+
+int sf32lb52_audio_hw_set_stage_callback(sf32lb52_audio_stage_cb_t cb)
+{
+  g_stage_cb = cb;
+  return OK;
+}
+
+/****************************************************************************
+ * Name: sf32lb52_audio_hw_stage_pointer
+ ****************************************************************************/
+
+FAR uint8_t *sf32lb52_audio_hw_stage_pointer(uint8_t half)
+{
+  if (half >= SF32LB52_AUDIO_STAGE_HALVES)
+    {
+      return NULL;
+    }
+
+  return &g_stage[half * SF32LB52_AUDIO_STAGE_BYTES];
 }
 
 /****************************************************************************

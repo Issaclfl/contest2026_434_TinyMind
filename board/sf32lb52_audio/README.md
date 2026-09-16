@@ -134,14 +134,14 @@ nxrecorder> record
 
 ### 6.1 已实测验证的结果
 
-在 `dev-ai-contest-2026` 分支、`arm-none-eabi-gcc 13.2.1` 下，全新配置完整构建：
+在 `dev-ai-contest-2026` 分支、`arm-none-eabi-gcc 13.2.1` 下，全新配置完整构建（含 M3）：
 
 ```text
-#### build completed successfully (01:26 (mm:ss)) ####
+#### build completed successfully ####
 
 Memory region         Used Size  Region Size  %age Used
-           flash:     1449172 B        16 MB      8.64%
-            sram:       72192 B       512 KB     13.77%
+           flash:     1451316 B        16 MB      8.65%
+            sram:       88672 B       512 KB     16.91%
            psram:           0 B         8 MB      0.00%
 ```
 
@@ -150,20 +150,37 @@ Memory region         Used Size  Region Size  %age Used
 | 符号 | 含义 |
 |------|------|
 | `sf32lb52_audio_initialize` | 驱动实例化入口 |
-| `sf32lb52_getcaps` | 能力查询回调 |
-| `sf32lb52_configure` | 格式配置回调 |
+| `sf32lb52_getcaps` / `sf32lb52_configure` | 能力查询 / 格式配置回调 |
 | `sf32lb52_audio_hw_init` | 硬件上电入口 |
 | `audio_register` | NuttX 设备注册 |
-| `nxrecorder_main` | 验证工具（NuttX 自带） |
+| `g_stage`（.bss @ `2000f080`） | 16 KiB 双半 DMA 暂存区（2 × 8 KiB） |
+| `sf32lb52_serve_half` | 半区数据搬运（中断上下文） |
+| `sf32lb52_stage_callback` | 中断→上层回调桥接 |
+| `sf32lb52_prime_playback` | 放音启动前预填暂存区 |
+| `hw_rx_dma_isr` / `hw_tx_dma_isr` | AUDPRC DMA 中断服务 |
+| `HAL_AUDPRC_RxCpltCallback` 等 4 个 | HAL 弱回调覆盖（全满/半满 × 收发） |
+| `nxrecorder_main` | 真机验证工具（NuttX 自带） |
 
 ### 6.2 阶段完成度
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| M1 | 框架接入：函数表 + `/dev/audio0` 注册 | ✅ 完成 |
-| M2 | 硬件上电：电源/时钟/路由/防爆音时序 | ✅ 完成 |
-| M3 | 数据流：`enqueuebuffer()` 挂队 + DMA 换桶 + `upper()` 回调 | ⏳ 进行中 |
+| M1 | 框架接入：函数表 + `/dev/audio0` 注册 | ✅ 完成，编译验证 |
+| M2 | 硬件上电：电源/时钟/路由/防爆音时序 | ✅ 完成，编译验证 |
+| M3 | 数据流：`enqueuebuffer` 挂队 + 环形 DMA + 半满/全满中断 + `upper(DEQUEUE)` 回调 | ✅ **代码完成，编译验证通过** |
 
-**已知限制**：`enqueuebuffer()` 当前返回 `-ENOSYS`，即录音/放音的数据通路尚未接通；
-`configure`/`start`/`stop` 的硬件动作已全部实现，可直接用串口日志验证。
-本仓不含未经实测的性能宣称。
+**M3 实现要点**（详见下文第七节）：
+
+- 采用**私有双半暂存区**（2 × 8 KiB）承载环形 DMA，一次中断交付/取用一个上层缓冲；
+  这样把 DCache 一致性、缓冲对齐、环形模式三个问题全部收敛到一块自有缓冲上。
+- DMA 走 **circular 模式 + 半满/全满双中断**——不是随意选择，而是 HAL 依据
+  `dest_sel != AUDPRC_TX_TO_MEM` 自行决定的模式（`bf0_hal_audprc.c:796`），
+  代码里显式设置 `dest_sel` 并加注释说明，避免日后被误改。
+- 采集方向在每个半区交付前 `up_invalidate_dcache()`，放音方向在回填后
+  `up_clean_dcache()`；启动前对整块暂存区 `up_flush_dcache()`。
+- `stop()` 会把 `pendq` 中尚未服务的缓冲全部以 `nbytes = 0` 交还上层，
+  否则 `nxrecorder` 会一直等不可能完成的缓冲。
+- 中断里只做一次有界 memcpy 加上层回调（NuttX 明确允许上层回调在中断上下文调用）。
+
+**尚未验证**：以上均为编译期与符号级验证。**真机行为（能否真正录到音、放音是否出声）
+尚未实测**，需上板后按 `docs/上板验证清单.md` 走一遍。本仓不含未经实测的性能数据。

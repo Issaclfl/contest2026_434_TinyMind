@@ -18,10 +18,10 @@
  *   http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied.  See the License for the specific language governing
- * permissions and limitations under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
  *
  ****************************************************************************/
 
@@ -38,6 +38,40 @@
 #include <stdint.h>
 
 /****************************************************************************
+ * Pre-processor Definitions
+ ****************************************************************************/
+
+/* Streaming geometry.
+ *
+ * The AUDPRC DMA is driven in circular mode (the HAL selects it because
+ * dest_sel != AUDPRC_TX_TO_MEM), so the HAL gives us half-complete and
+ * complete interrupts.  We hand the DMA *one* staging area of two halves,
+ * each half being exactly one ap_buffer's worth of audio, and turn each
+ * half/complete interrupt into one buffer delivered to / taken from the
+ * upper half.
+ *
+ * Why stage at all instead of pointing the DMA straight at the upper
+ * half's ap_buffers:
+ *   - the upper half owns buffer allocation, so the driver cannot promise
+ *     cache-line alignment or contiguous physical memory for them;
+ *   - the AUDPRC DMA runs in circular mode, which does not map onto a
+ *     per-buffer one-shot transfer;
+ *   - the D-cache is enabled (CONFIG_ARMV8M_DCACHE), so a DMA target that
+ *     the CPU also touches needs explicit cache maintenance.
+ * Staging confines all three problems to one buffer we own.  The cost is
+ * one 8 KiB memcpy per half (32 KiB/s at 16 kHz/16-bit/mono), which is
+ * negligible next to the DMA transfer itself.
+ */
+
+#define SF32LB52_AUDIO_STAGE_BYTES   CONFIG_AUDIO_BUFFER_NUMBYTES
+#define SF32LB52_AUDIO_STAGE_HALVES  2
+
+/* D-cache line size on this part is not exposed as a Kconfig symbol, so
+ * over-align: any power of two >= the real line size is safe. */
+
+#define SF32LB52_AUDIO_DMA_ALIGN     64
+
+/****************************************************************************
  * Public Types
  ****************************************************************************/
 
@@ -46,6 +80,19 @@ enum sf32lb52_audio_dir_e
   SF32LB52_AUDIO_CAPTURE = 0,   /* MIC -> AUDCODEC ADC -> AUDPRC RX -> DMA */
   SF32LB52_AUDIO_PLAYBACK = 1   /* DMA -> AUDPRC TX -> AUDCODEC DAC -> PA  */
 };
+
+/* Streaming callback.
+ *
+ * Invoked from DMA interrupt context when a staging half has just been
+ * filled by the ADC (capture) or has just been drained by the DAC
+ * (playback).  The callee must not block; it is expected to move at most
+ * one staging half's worth of data.
+ *
+ *   dir  - SF32LB52_AUDIO_CAPTURE or SF32LB52_AUDIO_PLAYBACK
+ *   half - 0 or 1, the staging half that needs servicing
+ */
+
+typedef CODE void (*sf32lb52_audio_stage_cb_t)(uint8_t dir, uint8_t half);
 
 /****************************************************************************
  * Public Function Prototypes
@@ -86,17 +133,50 @@ int sf32lb52_audio_hw_config_playback(uint32_t rate, uint8_t nchannels,
                                       uint8_t bpsamp);
 
 /****************************************************************************
+ * Name: sf32lb52_audio_hw_set_stage_callback
+ *
+ * Description:
+ *   Register the streaming callback (see sf32lb52_audio_stage_cb_t).
+ *   Call before sf32lb52_audio_hw_start(); pass NULL to detach.
+ *
+ ****************************************************************************/
+
+int sf32lb52_audio_hw_set_stage_callback(sf32lb52_audio_stage_cb_t cb);
+
+/****************************************************************************
+ * Name: sf32lb52_audio_hw_stage_pointer
+ *
+ * Description:
+ *   Address of staging half 0 or 1, for the streaming callback to read
+ *   from (capture) or write to (playback).
+ *
+ * Input Parameters:
+ *   half - 0 or 1
+ *
+ * Returned Value:
+ *   Pointer to SF32LB52_AUDIO_STAGE_BYTES bytes, or NULL if half is invalid.
+ *
+ ****************************************************************************/
+
+FAR uint8_t *sf32lb52_audio_hw_stage_pointer(uint8_t half);
+
+/****************************************************************************
  * Name: sf32lb52_audio_hw_start
  *
  * Description:
- *   Bring the configured stream up following the SDK anti-pop sequence.
+ *   Bring the configured stream up following the SDK anti-pop sequence and
+ *   start the circular DMA on the internal staging buffer.
+ *
+ *   The DMA always runs against the staging area; `buf`/`len` only carry the
+ *   upper half's buffer geometry so the caller can assert it matches what
+ *   the driver reported through AUDIOIOC_GETBUFFERINFO.  A mismatch is
+ *   rejected rather than silently truncated.  NULL/0 is accepted and means
+ *   "use whatever the driver was built with".
  *
  * Input Parameters:
  *   dir  - SF32LB52_AUDIO_CAPTURE or SF32LB52_AUDIO_PLAYBACK
- *   buf  - DMA target/source buffer; NULL keeps the stream gated at the
- *          AUDPRC level (hardware on, no DMA service) - M3 passes the
- *          ap_buffer data area here.
- *   len  - Buffer size in bytes (must be word aligned); 0 if buf is NULL.
+ *   buf  - Unused (staging is internal); must be NULL or the caller's buffer
+ *   len  - Expected bytes per upper-half buffer; 0 if not asserted
  *
  * Returned Value:
  *   OK on success; negative errno on failure.
@@ -109,7 +189,8 @@ int sf32lb52_audio_hw_start(uint8_t dir, uint8_t *buf, uint32_t len);
  * Name: sf32lb52_audio_hw_stop
  *
  * Description:
- *   Tear the stream down in the exact reverse (anti-pop) order.
+ *   Tear the stream down in the exact reverse (anti-pop) order and detach
+ *   the DMA interrupt.
  *
  * Input Parameters:
  *   dir - Stream direction to stop.

@@ -61,4 +61,10 @@ grep -q "^CONFIG_AUDIO=y" "$BOARD/configs/nsh/defconfig"              && echo " 
 grep -q "audio_register(\"/dev/audio0\"" "$BOARD/src/sifli_ap.c"      && echo "  [ok] /dev/audio0 注册代码就位"
 echo
 echo "下一步："
-echo "  ./build.sh vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/configs/nsh"
+echo "  cd $(cd "$HERE/../../.." && pwd)"
+echo "  source build/envsetup.sh"
+echo "  lunch vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/configs/nsh"
+echo "  m -j8"
+echo
+echo "提示：若改过 defconfig 而配置未生效（grep CONFIG_SYSTEM_NXRECORDER out/.../.config"
+echo "      仍显示 not set），先删除 out/sfili... 对应的构建目录再重新 lunch + m。"

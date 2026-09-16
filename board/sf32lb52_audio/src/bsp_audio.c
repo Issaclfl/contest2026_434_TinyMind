@@ -44,6 +44,8 @@
 
 #include <nuttx/kmalloc.h>
 #include <nuttx/audio/audio.h>
+#include <nuttx/queue.h>
+#include <nuttx/irq.h>
 
 #include "bsp_audio.h"
 #include "bsp_audio_hw.h"
@@ -77,6 +79,14 @@ struct sf32lb52_audio_s
   bool     configured;            /* True after a successful configure */
   bool     running;               /* True while the stream is active */
   bool     reserved;              /* Single-session reservation flag */
+
+  /* M3 streaming state.  pendq holds the ap_buffers the upper half has
+   * handed us; they are serviced one staging half at a time from the DMA
+   * interrupt, so pendq is touched from both task and interrupt context and
+   * every access is made inside a critical section. */
+
+  dq_queue_t pendq;               /* Pending ap_buffers (FIFO) */
+  uint32_t   overruns;            /* Halves dropped because pendq ran dry */
 };
 
 /****************************************************************************
@@ -105,9 +115,23 @@ static int sf32lb52_ioctl(FAR struct audio_lowerhalf_s *dev, int cmd,
 static int sf32lb52_reserve(FAR struct audio_lowerhalf_s *dev);
 static int sf32lb52_release(FAR struct audio_lowerhalf_s *dev);
 
+/* M3 streaming helpers */
+
+static void sf32lb52_stage_callback(uint8_t dir, uint8_t half);
+static uint32_t sf32lb52_serve_half(FAR struct sf32lb52_audio_s *priv,
+                                    uint8_t half);
+static void sf32lb52_prime_playback(FAR struct sf32lb52_audio_s *priv);
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
+
+/* This is a single-instance board driver (the codec, the PA enable line and
+ * the staging area are all singletons, and reserve()/release() enforce one
+ * session), so the hw layer's stage callback - which carries no context -
+ * resolves back to the one instance through this pointer. */
+
+static FAR struct sf32lb52_audio_s *g_audio_priv;
 
 static const struct audio_ops_s g_sf32lb52_audio_ops =
 {
@@ -132,6 +156,161 @@ static const struct audio_ops_s g_sf32lb52_audio_ops =
   .reserve       = sf32lb52_reserve,
   .release       = sf32lb52_release,
 };
+
+/****************************************************************************
+ * Streaming (M3)
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: sf32lb52_serve_half
+ *
+ * Description:
+ *   Move one staging half to or from the upper half.  Runs in interrupt
+ *   context; the hw layer has already handled the D-cache for this half
+ *   (invalidate for capture, clean for playback).
+ *
+ *   Exactly one ap_buffer is consumed per call, which is what keeps the
+ *   staging geometry (one half == one upper-half buffer) honest, and why
+ *   sf32lb52_configure() insists on CONFIG_AUDIO_BUFFER_NUMBYTES buffers.
+ *
+ * Input Parameters:
+ *   priv - Driver state
+ *   half - Staging half to service (0 or 1)
+ *
+ * Returned Value:
+ *   Bytes moved, or 0 if no buffer was waiting.
+ *
+ ****************************************************************************/
+
+static uint32_t sf32lb52_serve_half(FAR struct sf32lb52_audio_s *priv,
+                                    uint8_t half)
+{
+  FAR uint8_t *stage = sf32lb52_audio_hw_stage_pointer(half);
+  FAR struct ap_buffer_s *apb;
+  irqstate_t flags;
+  uint32_t n;
+
+  DEBUGASSERT(stage != NULL);
+
+  /* up_irq_save() rather than enter_critical_section(): with
+   * CONFIG_SCHED_CRITMONITOR_MAXTIME_CSECTION undefined the preprocessor
+   * treats it as 0, so spinlock.h declares enter_critical_section() as an
+   * external function while sched/irq/irq_csection.c only builds it for SMP
+   * - linking a non-SMP kernel that calls it fails.  This is a plain
+   * single-core board driver, so the arch primitive is both correct and
+   * sufficient. */
+
+  flags = up_irq_save();
+
+  /* dq_entry is the first member of ap_buffer_s, so the queue node pointer
+   * the queue hands back is the buffer itself. */
+
+  apb = (FAR struct ap_buffer_s *)dq_remfirst(&priv->pendq);
+  up_irq_restore(flags);
+
+  if (apb == NULL)
+    {
+      /* The upper half is not keeping up.  Capture has to drop the audio;
+       * playback has to keep the DMA fed or it would repeat the previous
+       * half, so silence is substituted. */
+
+      priv->overruns++;
+
+      if (priv->dir == SF32LB52_AUDIO_PLAYBACK)
+        {
+          memset(stage, 0, SF32LB52_AUDIO_STAGE_BYTES);
+        }
+
+      return 0;
+    }
+
+  n = apb->nmaxbytes;
+  if (n > SF32LB52_AUDIO_STAGE_BYTES)
+    {
+      n = SF32LB52_AUDIO_STAGE_BYTES;
+    }
+
+  if (priv->dir == SF32LB52_AUDIO_CAPTURE)
+    {
+      memcpy(apb->samp, stage, n);
+      apb->nbytes  = n;
+      apb->curbyte = 0;
+    }
+  else
+    {
+      memcpy(stage, apb->samp, n);
+
+      if (n < SF32LB52_AUDIO_STAGE_BYTES)
+        {
+          memset(stage + n, 0, SF32LB52_AUDIO_STAGE_BYTES - n);
+        }
+    }
+
+  if (priv->dev.upper != NULL)
+    {
+      priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_DEQUEUE, apb, OK);
+    }
+
+  return n;
+}
+
+/****************************************************************************
+ * Name: sf32lb52_stage_callback
+ *
+ * Description:
+ *   DMA interrupt entry point; the hw layer calls this once per staging
+ *   half.  It must not block: one bounded memcpy plus the upper-half
+ *   callback, which NuttX documents as callable from an interrupt handler.
+ *
+ ****************************************************************************/
+
+static void sf32lb52_stage_callback(uint8_t dir, uint8_t half)
+{
+  FAR struct sf32lb52_audio_s *priv = g_audio_priv;
+
+  if (priv == NULL || dir != priv->dir ||
+      half >= SF32LB52_AUDIO_STAGE_HALVES)
+    {
+      return;
+    }
+
+  sf32lb52_serve_half(priv, half);
+}
+
+/****************************************************************************
+ * Name: sf32lb52_prime_playback
+ *
+ * Description:
+ *   Fill every staging half from queued buffers before the transmit DMA
+ *   starts, so the DAC has real frames from the first sample.  Halves left
+ *   over when the queue runs dry stay silent - the anti-pop sequence mutes
+ *   the output for the first ~110ms anyway - and the interrupt path takes
+ *   over from there.
+ *
+ ****************************************************************************/
+
+static void sf32lb52_prime_playback(FAR struct sf32lb52_audio_s *priv)
+{
+  FAR uint8_t *stage;
+  uint8_t half;
+
+  for (half = 0; half < SF32LB52_AUDIO_STAGE_HALVES; half++)
+    {
+      stage = sf32lb52_audio_hw_stage_pointer(half);
+      if (stage != NULL)
+        {
+          memset(stage, 0, SF32LB52_AUDIO_STAGE_BYTES);
+        }
+    }
+
+  for (half = 0; half < SF32LB52_AUDIO_STAGE_HALVES; half++)
+    {
+      if (sf32lb52_serve_half(priv, half) == 0)
+        {
+          break;
+        }
+    }
+}
 
 /****************************************************************************
  * Private Functions
@@ -343,28 +522,28 @@ static int sf32lb52_start(FAR struct audio_lowerhalf_s *dev)
       return -EAGAIN;
     }
 
-  if (priv->dir == SF32LB52_AUDIO_CAPTURE)
+  if (priv->dir == SF32LB52_AUDIO_PLAYBACK)
     {
-      /* M2: bring the analog path up with DMA gated (buf = NULL).  M3
-       * passes the first ap_buffer here instead, enabling the stream. */
+      /* Feed the staging area from whatever the upper half queued before
+       * start(); the transmit DMA then runs against it continuously. */
 
-      ret = sf32lb52_audio_hw_start(SF32LB52_AUDIO_CAPTURE, NULL, 0);
-      if (ret != OK)
-        {
-          return ret;
-        }
-    }
-  else
-    {
-      /* Playback streams are started from enqueuebuffer() once the first
-       * data buffer is available (M3); starting without data would just
-       * push silence through the anti-pop sequence. */
-
-      _info("playback starts with the first buffer (M3)\n");
-      return -ENOSYS;
+      sf32lb52_prime_playback(priv);
     }
 
-  priv->running = true;
+  /* Capture needs no priming: the ADC starts filling the staging halves as
+   * soon as the DMA is armed, and the upper half's buffers are consumed by
+   * the interrupt path as they arrive. */
+
+  ret = sf32lb52_audio_hw_start(priv->dir, NULL, 0);
+  if (ret != OK)
+    {
+      return ret;
+    }
+
+  priv->overruns = 0;
+  priv->running  = true;
+
+  _info("start: dir=%u\n", priv->dir);
   return OK;
 }
 
@@ -377,11 +556,37 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
 {
   FAR struct sf32lb52_audio_s *priv =
     (FAR struct sf32lb52_audio_s *)dev;
+  FAR struct ap_buffer_s *apb;
+  irqstate_t flags;
 
-  _info("stop\n");
+  _info("stop: overruns=%lu\n", (unsigned long)priv->overruns);
 
   sf32lb52_audio_hw_stop(priv->dir);
   priv->running = false;
+
+  /* Give back whatever the upper half is still waiting on, otherwise it
+   * blocks on buffers that will never complete.  nbytes = 0 marks them as
+   * carrying no data. */
+
+  for (; ; )
+    {
+      flags = up_irq_save();
+      apb = (FAR struct ap_buffer_s *)dq_remfirst(&priv->pendq);
+      up_irq_restore(flags);
+
+      if (apb == NULL)
+        {
+          break;
+        }
+
+      apb->nbytes = 0;
+
+      if (priv->dev.upper != NULL)
+        {
+          priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_DEQUEUE, apb, OK);
+        }
+    }
+
   return OK;
 }
 #endif
@@ -421,27 +626,49 @@ static int sf32lb52_resume(FAR struct audio_lowerhalf_s *dev)
  * Name: sf32lb52_enqueuebuffer
  *
  * Description:
- *   Non-blocking buffer enqueue.  M2 stub: no DMA backend yet, so reject
- *   cleanly instead of silently swallowing buffers; the upper-half will
- *   surface the error to the caller.
- *
- *   M3 replaces this with: append to pendq, arm/refresh the RX DMA, and
- *   start playback streams on their first buffer.
+ *   Non-blocking buffer enqueue: the buffer goes on pendq and is serviced
+ *   later from the DMA interrupt, one staging half at a time.  Nothing is
+ *   moved here, so this returns immediately as the upper half expects.
  *
  * Input Parameters:
  *   dev - Lower-half device
  *   apb - The audio pipeline buffer to enqueue
  *
  * Returned Value:
- *   OK on success (buffer accepted); -ENOSYS until the DMA backend lands.
+ *   OK on success; -EINVAL if the buffer geometry does not match what
+ *   AUDIOIOC_GETBUFFERINFO reported.
  *
  ****************************************************************************/
 
 static int sf32lb52_enqueuebuffer(FAR struct audio_lowerhalf_s *dev,
                                   FAR struct ap_buffer_s *apb)
 {
-  _info("enqueuebuffer: no DMA backend yet (M3)\n");
-  return -ENOSYS;
+  FAR struct sf32lb52_audio_s *priv =
+    (FAR struct sf32lb52_audio_s *)dev;
+  irqstate_t flags;
+
+  if (apb == NULL || apb->samp == NULL || apb->nmaxbytes == 0)
+    {
+      return -EINVAL;
+    }
+
+  /* One staging half carries exactly one buffer, so the geometry advertised
+   * through AUDIOIOC_GETBUFFERINFO has to hold or the stream would be
+   * silently truncated. */
+
+  if (apb->nmaxbytes != SF32LB52_AUDIO_STAGE_BYTES)
+    {
+      _err("enqueue: nmaxbytes=%lu, staging half is %u\n",
+           (unsigned long)apb->nmaxbytes,
+           (unsigned)SF32LB52_AUDIO_STAGE_BYTES);
+      return -EINVAL;
+    }
+
+  flags = up_irq_save();
+  dq_addlast(&apb->dq_entry, &priv->pendq);
+  up_irq_restore(flags);
+
+  return OK;
 }
 
 /****************************************************************************
@@ -451,10 +678,29 @@ static int sf32lb52_enqueuebuffer(FAR struct audio_lowerhalf_s *dev,
 static int sf32lb52_cancelbuffer(FAR struct audio_lowerhalf_s *dev,
                                  FAR struct ap_buffer_s *apb)
 {
-  _info("cancelbuffer\n");
+  FAR struct sf32lb52_audio_s *priv =
+    (FAR struct sf32lb52_audio_s *)dev;
+  irqstate_t flags;
+  bool removed;
 
-  /* M3: drop apb from pendq if it is queued. */
+  if (apb == NULL)
+    {
+      return -EINVAL;
+    }
 
+  /* dq_rem() is a statement macro, so membership is tested first. */
+
+  flags = up_irq_save();
+
+  removed = dq_inqueue(&apb->dq_entry, &priv->pendq);
+  if (removed)
+    {
+      dq_rem(&apb->dq_entry, &priv->pendq);
+    }
+
+  up_irq_restore(flags);
+
+  _info("cancelbuffer: %s\n", removed ? "removed" : "was not queued");
   return OK;
 }
 
@@ -558,6 +804,8 @@ FAR struct audio_lowerhalf_s *sf32lb52_audio_initialize(void)
   priv->bpsamp = 16;
   priv->dir = SF32LB52_AUDIO_CAPTURE;
 
+  dq_init(&priv->pendq);
+
   /* M2: power/clock/routing bring-up so the hardware is ready before the
    * first configure/start. */
 
@@ -568,6 +816,11 @@ FAR struct audio_lowerhalf_s *sf32lb52_audio_initialize(void)
       kmm_free(priv);
       return NULL;
     }
+
+  /* M3: let the DMA interrupt path hand staging halves back to us. */
+
+  sf32lb52_audio_hw_set_stage_callback(sf32lb52_stage_callback);
+  g_audio_priv = priv;
 
   return &priv->dev;
 }

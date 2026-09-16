@@ -1,0 +1,44 @@
+CONFIG_ZEPHYR_REPO_DEFAULT
+ =====
+===== 2. 同步到工作树 =====
+===== 3. 行数 =====
+  573 /home/lawson/openvela/vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/src/bsp_audio.c
+  714 /home/lawson/openvela/vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/src/bsp_audio_hw.c
+ 1287 total
+===== 4. 编译 =====
+  cmake --build /home/lawson/openvela/out/sifli_sf32lb52_devkit_lcd_nsh -j8  --
+[0/1] Re-running CMake...
+-- NuttX Host Tools
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/lawson/openvela/out/sifli_sf32lb52_devkit_lcd_nsh/bin_host
+-- ╭─────────────────────────────────────────────────╮
+-- │  Vela build custom modules base on NuttX build  |
+-- ╰─────────────────────────────────────────────────╯
+-- Configuring done (2.8s)
+-- Generating done (1.0s)
+-- Build files have been written to: /home/lawson/openvela/out/sifli_sf32lb52_devkit_lcd_nsh
+[1/16] cd /home/lawson/openvela/out/sifli_sf32lb52_devkit_lcd_nsh/libs/libc/misc && /usr/bin/cmake -E touch /home/lawson/openvela/nuttx/libs/libc/misc/lib_utsname.c
+[2/16] cd /home/lawson/openvela/nuttx && /usr/bin/cmake -DKCONFIG_CONFIG=/home/lawson/openvela/vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/configs/nsh/defconfig -DNUTTX_DIR=/home/lawson/openvela/nuttx -DCMAKE_BINARY_DIR=/home/lawson/openvela/out/sifli_sf32lb52_devkit_lcd_nsh -P /home/lawson/openvela/nuttx/cmake/nuttx_generate_dts.cmake
+[3/16] Generating bin output directories
+[4/16] Building C object boards/CMakeFiles/board.dir/__/dummy.c.o
+[5/16] Building C object apps/CMakeFiles/apps.dir/dummy.c.o
+[6/16] Building C object CMakeFiles/nuttx.dir/empty.c.o
+[7/16] Building C object apps/external/android/CMakeFiles/android.dir/dummy.c.o
+[8/16] Linking C static library apps/external/android/libandroid.a
+[9/16] Building C object boards/CMakeFiles/board.dir/home/lawson/openvela/vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/src/sifli_ap.c.o
+[10/16] Linking C static library apps/libapps.a
+[11/16] Building C object boards/CMakeFiles/board.dir/home/lawson/openvela/vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/src/bsp_audio.c.o
+[12/16] Building C object boards/CMakeFiles/board.dir/home/lawson/openvela/vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/src/bsp_audio_hw.c.o
+[13/16] Linking C static library boards/libboard.a
+[14/16] Linking CXX executable nuttx
+Memory region         Used Size  Region Size  %age Used
+           flash:     1449172 B        16 MB      8.64%
+            sram:       72192 B       512 KB     13.77%
+           psram:           0 B         8 MB      0.00%
+[15/16] Generating System.map
+[16/16] Generating nuttx.bin
+
+[0;32m#### build completed successfully (9 seconds) ####[00m
+===== 5. 结果 =====
+-rwxr-xr-x 1 lawson lawson 1449172 Sep 17 00:01 /home/lawson/openvela/out/sifli_sf32lb52_devkit_lcd_nsh/nuttx.bin
