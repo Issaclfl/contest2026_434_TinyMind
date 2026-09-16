@@ -46,6 +46,7 @@
 #include <nuttx/audio/audio.h>
 #include <nuttx/queue.h>
 #include <nuttx/irq.h>
+#include <nuttx/wqueue.h>
 
 #include "bsp_audio.h"
 #include "bsp_audio_hw.h"
@@ -87,6 +88,8 @@ struct sf32lb52_audio_s
 
   dq_queue_t pendq;               /* Pending ap_buffers (FIFO) */
   uint32_t   overruns;            /* Halves dropped because pendq ran dry */
+  struct work_s complete_work;    /* Defers AUDIO_CALLBACK_COMPLETE off the
+                                   * stop() call path (see sf32lb52_stop) */
 };
 
 /****************************************************************************
@@ -568,6 +571,41 @@ static int sf32lb52_start(FAR struct audio_lowerhalf_s *dev)
   return OK;
 }
 
+/****************************************************************************
+ * Name: sf32lb52_complete_worker
+ *
+ * Description:
+ *   Deliver AUDIO_CALLBACK_COMPLETE from the low-priority work queue instead
+ *   of inline from stop().
+ *
+ *   Why this matters: the upper half pushes these callbacks into the
+ *   application's message queue with file_mq_send() at
+ *   CONFIG_AUDIO_BUFFER_DEQUEUE_PRIO, whose default is 1 - and nxrecorder
+ *   opens its queue without O_NONBLOCK, so that send *blocks* when the queue
+ *   is full (audio.c:66-68, :1434).  Calling it inline from stop() is unsafe:
+ *   at that instant the recording thread is parked inside the AUDIOIOC_STOP
+ *   ioctl and the CLI thread is parked in pthread_join, so nothing is
+ *   draining that queue - if it happens to be full, the send never returns
+ *   and the board appears hung.
+ *
+ *   Running it on a worker thread keeps the blocking legal (task context)
+ *   and lets stop() return so the application can resume draining.  NuttX
+ *   documents exactly this shape for lower halves: enqueuebuffer may "add it
+ *   to a queue for processing by a background thread or worker task"
+ *   (nuttx/audio/audio.c:1450).
+ *
+ ****************************************************************************/
+
+static void sf32lb52_complete_worker(FAR void *arg)
+{
+  FAR struct sf32lb52_audio_s *priv = (FAR struct sf32lb52_audio_s *)arg;
+
+  if (priv->dev.upper != NULL)
+    {
+      priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_COMPLETE, NULL, OK);
+    }
+}
+
 #ifndef CONFIG_AUDIO_EXCLUDE_STOP
 /****************************************************************************
  * Name: sf32lb52_stop
@@ -578,6 +616,7 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
   FAR struct sf32lb52_audio_s *priv =
     (FAR struct sf32lb52_audio_s *)dev;
   irqstate_t flags;
+  int ret;
 
   _info("stop: overruns=%lu\n", (unsigned long)priv->overruns);
 
@@ -597,24 +636,17 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
 
   up_irq_restore(flags);
 
-  /* Tell the upper half the stream has finished draining.
-   *
-   * audio_stop() puts the session into AUDIO_STATE_DRAINING *before* calling
-   * us (nuttx/audio/audio.c:692), and only AUDIO_CALLBACK_COMPLETE moves it
-   * back to OPEN (:1558).  Hosts rely on that message to finish: nxrecorder's
-   * record thread keeps looping after AUDIOIOC_STOP precisely so it can
-   * recover its buffers, and it leaves the loop only on AUDIO_MSG_COMPLETE
-   * (apps/system/nxrecorder/nxrecorder.c:804).  Without this callback the
-   * thread spins forever and the board appears to hang after `stop`.
-   *
-   * Buffers are not handed back here: the owner is about to exit and frees
-   * them itself through AUDIOIOC_FREEBUFFER, so pendq is just emptied to
-   * avoid keeping stale pointers.
+  /* Tell the upper half the stream has finished draining - but do it from the
+   * work queue, not from here.  See sf32lb52_complete_worker() for why a
+   * synchronous callback deadlocks the whole board.  -EBUSY simply means one
+   * is already pending, which is fine.
    */
 
-  if (priv->dev.upper != NULL)
+  ret = work_queue(LPWORK, &priv->complete_work, sf32lb52_complete_worker,
+                   priv, 0);
+  if (ret < 0 && ret != -EBUSY)
     {
-      priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_COMPLETE, NULL, OK);
+      _err("stop: work_queue failed: %d\n", ret);
     }
 
   _info("stop: done\n");
