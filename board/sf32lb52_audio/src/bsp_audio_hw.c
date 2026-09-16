@@ -98,17 +98,15 @@ struct audprc_clk_div_s
  * Private Data
  ****************************************************************************/
 
-/* HAL handles.  Codec-side DMA handles are configured but never started:
- * audio data always flows through AUDPRC (the SDK 52d board config does the
- * same - codec DMA Kconfigs stay off). */
+/* HAL handles.  Audio data always flows through AUDPRC (TX0/RX0), so the
+ * codec's own DMA channels are deliberately left unattached - see the note
+ * in sf32lb52_audio_hw_init(). */
 
 static AUDPRC_HandleTypeDef g_audprc;
 static AUDCODEC_HandleTypeDef g_audcodec;
 
 static DMA_HandleTypeDef g_audprc_hdma_tx;      /* HAL_AUDPRC_TX_CH0 */
 static DMA_HandleTypeDef g_audprc_hdma_rx;      /* HAL_AUDPRC_RX_CH0 */
-
-static DMA_HandleTypeDef g_codec_hdma[HAL_AUDCODEC_INSTANC_CNT];
 
 static bool g_hw_ready;
 static bool g_stream_on[2];
@@ -452,7 +450,6 @@ void HAL_AUDPRC_TxCpltCallback(AUDPRC_HandleTypeDef *haprc, int cid)
 int sf32lb52_audio_hw_init(void)
 {
   int ret;
-  int i;
 
   /* 1. Power and bus clocks (SDK: bf0_pll_calibration + rt_bf0_audio_*_init) */
 
@@ -460,19 +457,19 @@ int sf32lb52_audio_hw_init(void)
   HAL_RCC_EnableModule(RCC_MOD_AUDCODEC);
   HAL_RCC_EnableModule(RCC_MOD_AUDPRC);
 
-  /* 2. Codec handle.  DMA handles are attached (zeroed, like the SDK leaves
-   *    its unused channels) so HAL_AUDCODEC_Init() can iterate them, but
-   *    codec-side DMA is never started: audio data always flows through
-   *    AUDPRC (dma_config.h only routes codec ADC0 anyway). */
+  /* 2. Codec handle.
+   *
+   * The codec's own DMA channels are left NULL on purpose.  Audio data always
+   * flows through AUDPRC, and HAL_AUDCODEC_Init() skips NULL entries
+   * (bf0_hal_audcodec_m.c:680/685).  Attaching *zeroed* handles here instead
+   * makes the HAL call HAL_DMA_Init() on a handle whose Instance is NULL,
+   * which trips HAL_ASSERT(IS_DMA_ALL_INSTANCE(...)) - and in this HAL
+   * HAL_ASSERT expands to `while (1) {;}` (bf0_hal.h:419), i.e. a silent
+   * permanent hang at boot with no output and no reset.
+   */
 
   memset(&g_audcodec, 0, sizeof(g_audcodec));
   g_audcodec.Instance = hwp_audcodec;
-
-  for (i = 0; i < (int)HAL_AUDCODEC_INSTANC_CNT; i++)
-    {
-      g_audcodec.hdma[i] = &g_codec_hdma[i];
-      memset(&g_codec_hdma[i], 0, sizeof(g_codec_hdma[i]));
-    }
 
   ret = HAL_AUDCODEC_Init(&g_audcodec);
   if (ret != HAL_OK)
@@ -568,8 +565,12 @@ int sf32lb52_audio_hw_config_capture(uint32_t rate, uint8_t nchannels,
   g_audcodec.Init.adc_cfg.adc_clk =
     (FAR AUDCODE_ADC_CLK_CONFIG_TYPE *)adc_clk;
 
-  ret = HAL_AUDCODEC_Config_RChanel(&g_audcodec, HAL_AUDCODEC_ADC_CH0,
-                                    &g_audcodec.Init.adc_cfg);
+  /* Channel argument is a *relative* index within this direction (0 or 1),
+   * not the HAL_AUDCODEC_ChannelTypeDef value: the HAL switches on it with
+   * `case 0: / case 1:` and returns HAL_ERROR from `default:` - so passing
+   * HAL_AUDCODEC_ADC_CH0 (== 2) fails outright. */
+
+  ret = HAL_AUDCODEC_Config_RChanel(&g_audcodec, 0, &g_audcodec.Init.adc_cfg);
   if (ret != HAL_OK)
     {
       _err("codec Config_RChanel failed: %d\n", ret);
@@ -639,8 +640,9 @@ int sf32lb52_audio_hw_config_playback(uint32_t rate, uint8_t nchannels,
   g_audcodec.Init.dac_cfg.dac_clk =
     (FAR AUDCODE_DAC_CLK_CONFIG_TYPE *)dac_clk;
 
-  ret = HAL_AUDCODEC_Config_TChanel(&g_audcodec, HAL_AUDCODEC_DAC_CH0,
-                                    &g_audcodec.Init.dac_cfg);
+  /* Relative channel index, same convention as Config_RChanel above. */
+
+  ret = HAL_AUDCODEC_Config_TChanel(&g_audcodec, 0, &g_audcodec.Init.dac_cfg);
   if (ret != HAL_OK)
     {
       _err("codec Config_TChanel failed: %d\n", ret);

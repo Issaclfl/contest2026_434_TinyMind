@@ -514,6 +514,17 @@ static int sf32lb52_shutdown(FAR struct audio_lowerhalf_s *dev)
 
   sf32lb52_audio_hw_stop(SF32LB52_AUDIO_CAPTURE);
   sf32lb52_audio_hw_stop(SF32LB52_AUDIO_PLAYBACK);
+
+  /* The upper half calls shutdown() when the last handle is closed, so this
+   * is the only reliable place to drop the session state.  Leaving `reserved`
+   * set makes every later open fail with -EBUSY ("Audio device busy" in
+   * nxrecorder) even though nobody holds the device any more. */
+
+  priv->reserved   = false;
+  priv->running    = false;
+  priv->configured = false;
+
+  _info("shutdown: done\n");
   return OK;
 }
 
@@ -566,7 +577,6 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
 {
   FAR struct sf32lb52_audio_s *priv =
     (FAR struct sf32lb52_audio_s *)dev;
-  FAR struct ap_buffer_s *apb;
   irqstate_t flags;
 
   _info("stop: overruns=%lu\n", (unsigned long)priv->overruns);
@@ -574,29 +584,40 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
   sf32lb52_audio_hw_stop(priv->dir);
   priv->running = false;
 
-  /* Give back whatever the upper half is still waiting on, otherwise it
-   * blocks on buffers that will never complete.  nbytes = 0 marks them as
-   * carrying no data. */
+  /* Empty the queue without handing the buffers back through
+   * AUDIO_CALLBACK_DEQUEUE.  The owner is about to exit and releases them
+   * itself via AUDIOIOC_FREEBUFFER; re-delivering them here would just make
+   * it write the tail of the recording out a second time.
+   */
 
-  for (; ; )
+  flags = up_irq_save();
+  while (dq_remfirst(&priv->pendq) != NULL)
     {
-      flags = up_irq_save();
-      apb = (FAR struct ap_buffer_s *)dq_remfirst(&priv->pendq);
-      up_irq_restore(flags);
-
-      if (apb == NULL)
-        {
-          break;
-        }
-
-      apb->nbytes = 0;
-
-      if (priv->dev.upper != NULL)
-        {
-          priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_DEQUEUE, apb, OK);
-        }
     }
 
+  up_irq_restore(flags);
+
+  /* Tell the upper half the stream has finished draining.
+   *
+   * audio_stop() puts the session into AUDIO_STATE_DRAINING *before* calling
+   * us (nuttx/audio/audio.c:692), and only AUDIO_CALLBACK_COMPLETE moves it
+   * back to OPEN (:1558).  Hosts rely on that message to finish: nxrecorder's
+   * record thread keeps looping after AUDIOIOC_STOP precisely so it can
+   * recover its buffers, and it leaves the loop only on AUDIO_MSG_COMPLETE
+   * (apps/system/nxrecorder/nxrecorder.c:804).  Without this callback the
+   * thread spins forever and the board appears to hang after `stop`.
+   *
+   * Buffers are not handed back here: the owner is about to exit and frees
+   * them itself through AUDIOIOC_FREEBUFFER, so pendq is just emptied to
+   * avoid keeping stale pointers.
+   */
+
+  if (priv->dev.upper != NULL)
+    {
+      priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_COMPLETE, NULL, OK);
+    }
+
+  _info("stop: done\n");
   return OK;
 }
 #endif
