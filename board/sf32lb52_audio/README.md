@@ -327,22 +327,50 @@ NULL"设计的。
 
 **修复**：在 `shutdown()` 里复位这三个状态位（这是唯一可靠的会话结束钩子）。
 
-#### (4) `stop` 之后整块板卡死
+#### (4) `stop` 之后整块板卡死（两阶段排查）
 
 **现象**：录音日志一切正常（`overruns=0`），但 `stop` 之后板子再无任何响应，
-连 `uname -a` 都不回。
+连 `uname -a` 都不回。约 1/3 的会话必现，**间歇性**。
 
-**根因**：上半身的 `audio_stop()` 会**先把会话置为 `AUDIO_STATE_DRAINING`，
-再调用下半身的 `stop()`**（`audio.c:692`），而只有 `AUDIO_CALLBACK_COMPLETE`
-能把它转回 `OPEN`（`audio.c:1558`）。主机侧同样在等这个信号：`nxrecorder` 的
-录音线程收到 `AUDIOIOC_STOP` 后**故意不退出循环**，"we will loop until
-AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有
-`AUDIO_MSG_COMPLETE` 才让它 `running = false`。
+**第一阶段——缺失的完成信号**
 
-**修复**：`stop()` 清空 `pendq` 后主动上报 `AUDIO_CALLBACK_COMPLETE`。
+上半身的 `audio_stop()` 会**先把会话置为 `AUDIO_STATE_DRAINING`，再调用下半身的
+`stop()`**（`audio.c:692`），而只有 `AUDIO_CALLBACK_COMPLETE` 能把它转回
+`OPEN`（`audio.c:1558`）。主机侧同样在等这个信号：`nxrecorder` 的录音线程收到
+`AUDIOIOC_STOP` 后**故意不退出循环**，注释写明 "we will loop until
+AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有 `AUDIO_MSG_COMPLETE`
+才让它 `running = false`。
+
+于是在 `stop()` 里补上了 `upper(AUDIO_CALLBACK_COMPLETE)`。
 
 **经验**：NuttX 音频框架的 `stop` 是一次**双向握手**——下半身必须回一个
-"complete" 才算结束。只停硬件不回消息，主机线程会永远等下去，表现为整机假死。
+"complete" 才算结束。只停硬件不回消息，主机线程会永远等下去。
+
+**第二阶段——即使补了信号，仍然会卡**
+
+补上 COMPLETE 后成功率上升，但**偶发卡死依旧存在**（30 秒连续录音那次就复现了）。
+继续追下去，真正的根因是**阻塞发送**：
+
+- `AUDIO_CALLBACK_COMPLETE` 最终会走到上半身的 `file_mq_send()`，其优先级取
+  `CONFIG_AUDIO_BUFFER_DEQUEUE_PRIO`。该宏在 `nuttx/audio/audio.c:66-68` 的
+  **默认值是 1**，而 `nxrecorder` 打开消息队列时**没有 `O_NONBLOCK`**——
+  也就是说**队列满时这个发送会阻塞**。
+- 而调用现场是：录音线程停在 `AUDIOIOC_STOP` ioctl 内部（即我们的 `stop()` 里），
+  CLI 主线程停在 `pthread_join` 上，**没有任何人在排空那个队列**。队列一旦恰好
+  是满的，发送永不返回 → 整机假死。这解释了它为什么是间歇性的：取决于那一刻
+  队列里恰好堆了多少条待处理的 DEQUEUE 消息。
+
+**最终修复**：把 COMPLETE 投递到**低优先级工作队列**异步发送
+（`work_queue(LPWORK, ...)` → `sf32lb52_complete_worker()`）。任务上下文里阻塞
+是合法的；`stop()` 得以立即返回，应用随即恢复排空队列。
+
+这正是 NuttX 自己给 lower-half 建议的形态——框架注释写着 enqueuebuffer 可以
+"add it to a queue for processing by a background thread or worker task"
+（`nuttx/audio/audio.c:1450`）。
+
+**经验**：**在别人的调用路径上同步回调，风险比看起来大**。框架的 `file_mq_send`
+默认是阻塞语义，而"谁在排空这个队列"必须逐案推演——如果答案是"没有人在排空"，
+那么同步回调就是死锁。把回调挪到自己的工作队列里，能把这类问题一次性消掉。
 
 #### 真机验证结果
 
@@ -351,8 +379,17 @@ AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有
 | 证据 | 结果 |
 |------|------|
 | `ls /dev` | 出现 **`audio0`** |
-| `nxrecorder` 串口日志 | `capture config: 48000Hz 2ch 16bit` → `capture started (staging 16384 B, circular)` → `stop: overruns=0` |
-| 录音文件 | **270,336 字节**（33 个 8 KiB 缓冲） |
-| 文件内容 | `hexdump` 显示采样值平滑连续（16106→…→2000 余），**非全零、非乱码** → ADC 在真实转换模拟输入 |
-| `stop` 之后 | 板子仍正常响应（`uname -a` 正常返回） |
+| `nxrecorder` 串口日志 | `capture config: 16000Hz 1ch 16bit` → `capture started (staging 16384 B, circular)` → `stop: overruns=0` |
+| **30 秒连续录音** | **`overruns=0`（全程零丢包）**，落盘 **1,048,576 字节** |
+| 录音文件回传 | 分 32 块经串口搬回、每块校验字节数：**1,048,576 / 1,048,576 完整**（100% 无损） |
+| 音频内容 | 峰值 32715 / RMS 285.8，52.4 万样本中 52.1 万非零，波形平滑连续 → ADC 在真实转换模拟输入 |
+| 可播放产物 | 导出为 16 kHz 单声道 WAV（32.8 秒），已在 PC 上实际播放验证 |
+| `stop` 之后 | 板子仍正常响应（`uname -a` 正常返回），多次会话可重复 |
+
+**可听证据**：`docs/audio-evidence/board-capture-16k-mono.wav`（板子录到的真实音频）。
+
+> **一个值得记录的工程教训**：本次曾出现"提交仓里 `.c` 与 `.h` 不匹配、评审 clone
+> 后必然编译失败"的情况——原因是本地同步脚本只同步了 `.c` 而漏了 `.h`，而工作树里
+> 恰是正确版本，所以本地一直编得过。**教训：交付前必须校验"仓 vs 工作树"逐字节一致，
+> 而不是"我本地能编过"。** 已补上自动化校验脚本。
 
