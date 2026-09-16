@@ -13,13 +13,17 @@
  #if defined(CONFIG_SPI) && defined(CONFIG_MMCSD_SPI) && \
    defined(CONFIG_BSP_USING_SPI1)
  #  include <nuttx/mmcsd.h>
-@@ -461,6 +467,31 @@
+@@ -461,6 +467,35 @@
      }
  #endif
  
 +#ifdef CONFIG_AUDIO
 +  /* SF32LB52 on-chip audio codec: onboard analog mic in, speaker out
-+   * through the Class-D PA (enable on PA10).  Register as /dev/audio0. */
++   * through the Class-D PA (enable on PA10).
++   *
++   * audio_register() takes the *name* only: with CONFIG_AUDIO_DEV_ROOT
++   * it builds "/dev/" + name (nuttx/audio/audio.c:1808), so passing the
++   * full "/dev/audio0" here would register "/dev//dev/audio0" instead. */
 +
 +  FAR struct audio_lowerhalf_s *audio = sf32lb52_audio_initialize();
 +  if (audio == NULL)
@@ -28,7 +32,7 @@
 +    }
 +  else
 +    {
-+      ret = audio_register("/dev/audio0", audio);
++      ret = audio_register("audio0", audio);
 +      if (ret < 0)
 +        {
 +          syslog(LOG_ERR, "ERROR: audio_register(/dev/audio0) failed: %d\n",

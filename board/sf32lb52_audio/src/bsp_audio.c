@@ -342,16 +342,26 @@ static int sf32lb52_getcaps(FAR struct audio_lowerhalf_s *dev, int type,
       case AUDIO_TYPE_QUERY:                 /* Overall device query */
         if (caps->ac_subtype == AUDIO_TYPE_QUERY)
           {
-            /* Report we are an input (capture) device supporting PCM */
+            /* Both directions are reported: the driver implements the full
+             * capture and playback paths (AUDCODEC ADC/DAC + AUDPRC RX/TX),
+             * so a host looking for AUDIO_TYPE_OUTPUT - nxplayer, say -
+             * finds this device instead of skipping it. */
 
             caps->ac_channels = 2;         /* 1 min .. 2 max channels */
             caps->ac_format.hw = 1 << (AUDIO_FMT_PCM - 1);
-            caps->ac_controls.b[0] = AUDIO_TYPE_INPUT;
+            caps->ac_controls.b[0] = AUDIO_TYPE_INPUT | AUDIO_TYPE_OUTPUT;
             ret = caps->ac_len;
           }
         break;
 
       case AUDIO_TYPE_INPUT:                 /* Input device detail query */
+        caps->ac_channels = 2;
+        caps->ac_format.hw = 1 << (AUDIO_FMT_PCM - 1);
+        caps->ac_controls.hw[0] = SF32LB52_AUDIO_SAMPRATES;
+        ret = caps->ac_len;
+        break;
+
+      case AUDIO_TYPE_OUTPUT:                /* Output device detail query */
         caps->ac_channels = 2;
         caps->ac_format.hw = 1 << (AUDIO_FMT_PCM - 1);
         caps->ac_controls.hw[0] = SF32LB52_AUDIO_SAMPRATES;
