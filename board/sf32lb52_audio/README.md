@@ -140,7 +140,7 @@ nxrecorder> record
 #### build completed successfully ####
 
 Memory region         Used Size  Region Size  %age Used
-           flash:     1451316 B        16 MB      8.65%
+           flash:     1451360 B        16 MB      8.65%
             sram:       88672 B       512 KB     16.91%
            psram:           0 B         8 MB      0.00%
 ```
@@ -184,3 +184,87 @@ Memory region         Used Size  Region Size  %age Used
 
 **尚未验证**：以上均为编译期与符号级验证。**真机行为（能否真正录到音、放音是否出声）
 尚未实测**，需上板后按 `docs/上板验证清单.md` 走一遍。本仓不含未经实测的性能数据。
+
+---
+
+## 七、适配难点与修复记录
+
+本节记录适配过程中**实际踩到并修掉**的问题。它们大多属于"编译能过、上板才炸"的类型，
+也是本项目最值得复用的经验。
+
+### 7.1 设备注册路径：传了完整路径，设备根本没注册上
+
+**现象**：编译通过、符号齐全，但真机上 `ls /dev` 永远没有音频设备。
+
+**根因**：`audio_register()` 只接受设备**名**，NuttX 内部拼成 `/dev/audio/[name]`
+（`nuttx/audio/audio.c:1793-1835`，官方注释见 `:1926-1929`）。传入完整路径
+`"/dev/audio0"` 时算出的路径是 `/dev/audio//dev/audio0`；而 `inode_reserve()`
+遇到中间目录不存在会**直接返回 `-ENOENT`**（`nuttx/fs/inode/fs_inodereserve.c:243-246`），
+注册必然失败。
+
+**修复**：改用 NuttX 为这种情况提供的 "simple case"
+（`CONFIG_AUDIO_CUSTOM_DEV_PATH=y` + `CONFIG_AUDIO_DEV_ROOT=y`，定义见
+`nuttx/audio/Kconfig:219,229`）——路径变为 `"/dev/" + name`，得 `/dev/audio0`，
+且无需预先创建目录。调用改为传裸名：`audio_register("audio0", audio)`。
+
+**经验**：NuttX 里凡是 `xxx_register(name, ...)` 形式的接口，先确认它要的是
+"名字"还是"路径"。名字型的接口传错路径往往不报错，而是静默错位。
+
+### 7.2 `cat /dev/audio0` 是无效的验证方法
+
+**现象**：`cat /dev/audio0` 立刻返回、无输出、无报错，看起来"设备正常"。
+
+**根因**：NuttX 音频上半身的 `audio_read()` 是空壳——`ops->read == NULL` 时直接
+`return 0`（`nuttx/audio/audio.c:305-310`），表现为立即 EOF。数据通路根本不经过
+`read()`，而走 ENQUEUEBUFFER / DEQUEUE 回调 + 消息队列。
+
+**修复**：验证一律使用 `nxrecorder`（走 RESERVE → GETCAPS → CONFIGURE →
+GETBUFFERINFO → ENQUEUEBUFFER → START 完整流程）。另注意：未 CONFIGURE 就
+START 会返回 `-EPERM`（`audio.c:621-624`）。
+
+**经验**："不报错"不等于"成功"。对这种空壳接口，必须用会真正走完整流程的工具验证。
+
+### 7.3 `enter_critical_section()` 在非 SMP 配置下链不出来
+
+**现象**：编译通过，链接失败——`undefined reference to enter_critical_section`。
+
+**根因**：`nuttx/include/nuttx/spinlock.h:1538-1542` 的守卫是
+`#if CONFIG_SCHED_CRITMONITOR_MAXTIME_CSECTION >= 0 || defined(...INSTRUMENTATION_CSECTION)`。
+该配置项在本板**未定义**，预处理时按 0 参与比较，`0 >= 0` 为真，于是
+`enter_critical_section` 被声明为**外部函数**；而它的实现
+（`sched/irq/irq_csection.c`）只在 SMP 下编译。
+
+**修复**：单核板级驱动改用体系结构原语 `up_irq_save()` / `up_irq_restore(flags)`。
+
+**经验**：报"未定义"时，先分辨是"我写错了"还是"这个符号在本配置下本就不存在"。
+
+### 7.4 `dq_rem()` 是语句宏，不能当表达式用
+
+**现象**：编译报 `expected expression before 'do'`。
+
+**根因**：`dq_rem()` 是 `do { ... } while (0)` 形式的宏（`nuttx/include/nuttx/queue.h:229`），
+无法出现在赋值右侧。
+
+**修复**：先用同为宏但会求值的 `dq_inqueue()`（`queue.h:325`）判断，再调用 `dq_rem()`。
+
+### 7.5 改 defconfig 后配置不生效（构建系统陷阱）
+
+**现象**：改了 defconfig，`grep CONFIG_XXX out/<board>_<config>/.config` 仍是
+`not set`，且**产物大小与改动前完全一致**。
+
+**根因**：增量构建复用 `out/.../.config`，**不会重新读取 defconfig**。
+判断依据：`.config` 的时间戳停留在上一次配置的时间。
+
+**修复**：删除 `out/<board>_<config>` 后重新 `lunch` + `m`。
+
+**经验**：核对"产物大小/行数是否变化"，是识破"编译成功但跑的是旧代码"的唯一廉价手段。
+
+### 7.6 工具链与 kconfiglib 不在非交互 shell 的 PATH 里
+
+| 缺失项 | 报错 | 位置 |
+|--------|------|------|
+| ARM 工具链 | `/bin/sh: 1: arm-none-eabi-ar: not found`（链接期才报） | `~/arm-tc-root/usr/bin` |
+| kconfiglib 的 `olddefconfig` | `FATAL_ERROR: Kconfig environment depends on kconfiglib`（模块其实已装，是 PATH 问题） | `~/.local/bin` |
+
+**修复**：脚本里显式 `export PATH="$HOME/arm-tc-root/usr/bin:$HOME/.local/bin:$PATH"`。
+
