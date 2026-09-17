@@ -53,14 +53,30 @@
 真机实测（非模拟、非估算）：Agent 启动完成，**36 个工具注册**、Skills 系统装载、
 配置写入成功。
 
-### 第 3 层：IP 承载（软件完成并经真机验证，只差一根线）
+### 第 3 层：IP 承载（已完成，端到端跑通）
 
 这块板子**没有任何网卡**：vendor 树里没有 WiFi 驱动，芯片不带以太网 MAC，片内 USB 是
 CDC ACM 串口（也就是控制台）。开箱状态是 `CONFIG_NET` 关闭、整板只有一条串口调试线。
 没有 IP，Agent 就够不到 LLM 端点。
 
-我们补上了这条缺失的传输层：**UART2 上跑 PPP**，PC 侧做网关。SLIP 走不通——Linux 5.14
+我们补上了这条缺失的传输层：**在串口上跑 PPP**，PC 侧做网关。SLIP 走不通——Linux 5.14
 起移除了内核 SLIP 支持——所以用 PPP。
+
+**实测（只用一根 USB 线，未接任何额外硬件）**：
+
+```
+板子  ifconfig      ppp0  inet addr:10.0.0.2  DRaddr:10.0.0.1
+板子  ping 223.5.5.5 →  56 bytes, time=130.0 ms
+Agent [netmgr] Network connected: 10.0.0.2
+      [agent] All network services started!
+对话  [vela_tls] Handshake OK: TLSv1.2 / TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+      [Agent]: 你好！我是运行在 Vela 嵌入式设备上的 AI 助手……
+工具  [tools] Executing tool: get_current_time
+```
+
+补上承载之前，Agent 启动时报的是 `[netmgr] Timed out waiting for network`；
+补上之后它自己认到了 `ppp0`。完整日志见
+[`docs/AI-Agent端到端实测证据.md`](docs/AI-Agent端到端实测证据.md)。
 
 ### 对照「基于 openvela 开发的判定标准」
 
@@ -110,17 +126,16 @@ CDC ACM 串口（也就是控制台）。开箱状态是 `CONFIG_NET` 关闭、�
 
 ### IP 承载（第 3 层）
 
-PC 侧每一环都拿真硬件跑过：
-
 | 环节 | 怎么验的 | 结果 |
 |---|---|---|
 | WSL ↔ Windows 宿主 TCP | 两个方向对打 | 通 |
 | Windows 串口桥：COM ↔ TCP 双向 | 桥接板子控制台，从 WSL 发 `uname -a` | 板子执行并把结果送回 |
 | socat：TCP ↔ PTY | 与桥串起来跑上面那条 | 通 |
-| pppd 协商 + 分配 IP + 数据面 | WSL 内两个 PTY 对接跑两个 pppd | LCP/IPCP 成功，ppp0/ppp1 起来，**跨链路 ping 3/3 零丢包** |
+| pppd 协商 + 分配 IP + 数据面 | WSL 内两个 PTY 对接跑两个 pppd | LCP/IPCP 成功，**跨链路 ping 3/3 零丢包** |
 | 板子 `/dev/ttyS0` 可打开、可改速率 | `pppd /dev/ttyS0 460800` | 通过 |
 | `pppd` 内置命令 + 直连模式 | `pppd -h` 打印用法 | 通过（补丁在真机生效） |
-| **UART2 ↔ USB-TTL ↔ 桥 ↔ pppd** | 需要三根杜邦线 | 待接线 |
+| **原生 USB 端到端** | `ppp_e2e.py --mode usb` | **通**：ppp0 起来、板子 ping 外网 130 ms |
+| **经该链路的真实对话** | `ai_agent` → `set_llm` → `ask` | **通**：TLS 1.2 握手，157 字节真实回复 |
 
 ### 诚实说明
 
@@ -131,6 +146,10 @@ PC 侧每一环都拿真硬件跑过：
   （`frameworks/multimedia/media/`），`CONFIG_MEDIA` 依赖 `LIB_FFMPEG`——在 armv8-m 上
   把这套媒体守护进程移植过来是另一个独立工程。所以本作品**只承诺文本对话**，语音通道
   如实标记为后续工作。
+- **原生 USB 通路有两个已知限制**：板子每次复位/重新烧录后 PC 侧的 COM 口会打不开，
+  需要物理拔插一次那条线（可稳定复现；探针显示 Windows 反复对 CDC 端点 `0x83` 发
+  `CLEAR_FEATURE(HALT)`，该通知端点一直 stall）；`/data` 是 tmpfs，重启后 `set_llm`
+  的配置要重设。
 - 本仓不含未经实测的性能数据。
 
 ---

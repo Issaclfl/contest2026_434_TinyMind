@@ -153,8 +153,8 @@
       "tool": "zcode",
       "title": "openvela",
       "started_at": "2026-09-05T17:17:54.738Z",
-      "last_event_at": "2026-09-17T15:35:05.654Z",
-      "event_count": 635,
+      "last_event_at": "2026-09-17T16:44:06.312Z",
+      "event_count": 758,
       "file_path": "logs/Issaclfl/2026-09-05/zcode__sess_376acc10-ec32-44a6-91b4-34dd3e90f66c.jsonl",
       "collection_mode": "manual",
       "health": "ok"
@@ -215,5 +215,5 @@
       "health": "ok"
     }
   ],
-  "updated_at": "2026-09-17T15:35:22.604204+00:00"
+  "updated_at": "2026-09-17T16:44:15.229724+00:00"
 }
