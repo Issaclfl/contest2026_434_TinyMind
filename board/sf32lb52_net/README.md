@@ -267,7 +267,7 @@ RTS 行为直接决定板子是死是活——`screen` / `cu` 会让芯片一直
 
 ## 实测记录
 
-PC 侧每一环都拿真硬件跑过；只差 UART2 那三根线。
+**两条通路都已在真机上端到端跑通。**
 
 | 环节 | 怎么验的 | 结果 |
 |---|---|---|
@@ -276,11 +276,21 @@ PC 侧每一环都拿真硬件跑过；只差 UART2 那三根线。
 | socat：TCP ↔ PTY | 与桥串起来跑上面那条 | 通 |
 | pppd 协商 + 分配 IP + 数据面 | WSL 内两个 PTY 对接跑两个 pppd | LCP/IPCP 成功，ppp0/ppp1 起来，跨链路 ping 3/3 零丢包 |
 | 板子 `/dev/ttyS0` 可打开 | `pppd /dev/ttyS0 460800` | 通过 |
-| `CONFIG_SERIAL_TERMIOS` 生效 | 同上，看是否打印 `at 460800 baud` | **通过**（这是我补的 Kconfig 缺口，不补就只能跑 1000000） |
+| `CONFIG_SERIAL_TERMIOS` 生效 | 同上，看是否打印 `at 460800 baud` | **通过**（不补那行 Kconfig `select`，就只能跑 1000000） |
 | `pppd` 内置命令 + 直连模式 | `pppd -h` 打印用法 | 通过（补丁在真机生效） |
-| `ai_agent` 启动 | 板子上跑 `ai_agent` | 通过：36 个工具注册、Skills 装载、`set_llm` 写入成功 |
-| `ai_agent` 网络管理器 | 启动日志 | `[netmgr] Timed out waiting for network`——正是缺 IP |
-| **UART2 ↔ USB-TTL ↔ 桥 ↔ pppd** | 需要接线 | 待接线后验证 |
+| **路线 1：原生 USB 端到端** | `pppd /dev/ttyACM0 115200 &` + `ppp_e2e.py --mode usb` | **通**：ppp0 起来、板子 `ping 223.5.5.5` 130 ms、Agent 报 `Network connected: 10.0.0.2` |
+| **路线 1 上的真实对话** | `ai_agent` → `set_llm` → `ask` | **通**：`TLSv1.2` 握手成功，157 字节真实回复；工具调用 `get_current_time` 正常 |
+| 路线 2：UART2 + USB-TTL | 物理接线 | 软件链路全环节已验证，未做物理联调（路线 1 已满足需求） |
+
+### 路线 1 实测到的两个限制（如实记录）
+
+**一、板子每次复位或重新烧录后，COM 口会打不开，必须把线物理拔插一次。**
+可稳定复现。加了 USB 探针后看到 Windows 在反复对端点 `0x83`（CDC 的中断通知
+端点）发 `CLEAR_FEATURE(HALT)`，即该端点一直处于 stall 状态——很可能是
+`usbser` 建立通知管道失败导致端口不可用，拔插后能建立成功。**已定位到这一层，
+未继续修**。
+
+**二、`/data` 是 tmpfs**，重启后 `set_llm` 写入的配置要重设。
 
 板子上 PSRAM 已经在堆里：`free` 报 Umem 总量 8.7 MB（512 KB SRAM + 8 MB
 PSRAM，`CONFIG_MM_REGIONS=2`），不需要额外动作。
