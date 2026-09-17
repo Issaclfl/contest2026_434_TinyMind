@@ -145,14 +145,30 @@ MSS 夹取规则；起 `pppd` 并等 ppp0 出现。拆链路用 `ppp_down.sh`。
 不夹的话板子会按 1500 发，WSL 往 eth0 转发时直接超 MTU。`ppp_up.sh` 在
 `FORWARD` 链两个方向都把 SYN 的 MSS 设成 `出口MTU - 40`。
 
-## 一次跑通（顺序不能乱）
+## 一次跑通
+
+`pc_side/ppp_e2e.py` 把整条链路的四步串成一条命令，每步的输出都打出来：
+
+```bash
+# 路线 1（优先）：第二条 USB-C 线接芯片原生 USB 口
+python ppp_e2e.py --mode usb   --port COM6
+
+# 路线 2：USB-TTL 接 UART2
+python ppp_e2e.py --mode usbttl --port COM8
+
+# 不确定哪个口是哪个就先看：
+python ppp_e2e.py --list
+```
+
+想手动做也行，顺序不能乱：
 
 ```bash
 # 1) 板子：后台起 pppd，控制台保持可用
-nsh> pppd /dev/ttyS0 460800 &
+nsh> pppd /dev/ttyACM0 115200 &      # 路线 1
+nsh> pppd /dev/ttyS0   460800 &      # 路线 2
 
-# 2) Windows：把 USB-TTL 的 COM 口挂到 TCP 上
-python serial_tcp_bridge.py COM7 460800
+# 2) Windows：把承载 PPP 的 COM 口挂到 TCP 上
+python serial_tcp_bridge.py COM6 115200
 
 # 3) WSL：起 ppp0 + NAT + MSS 夹取（宿主地址自动探测）
 wsl.exe -d Ubuntu-24.04 -u root -e bash -lc \
@@ -167,22 +183,39 @@ nsh> ping 223.5.5.5
 
 拆链路：`ppp_down.sh`。
 
-## 为什么不走片内 USB，非要外接一根线
+## 两条通路，先试免接线的那条
 
-板子上其实还有一个串口：片内 USB CDC ACM，固件里 `cdcacm_initialize()` 会把它注册成
-`/dev/ttyACM0`（`ls /dev` 能看到）。如果能用它跑 PPP，就完全不需要 USB-TTL、也不需要接线。
+板子上有**两个 Type-C 口**（板子官网规格页列明）：
 
-**实测走不通**：把板子插到 PC 上，Windows 的设备列表里只有板载 CH343 桥（`1A86:55D3`，
-枚举为 COM5，通到 UART1 控制台），**枚举不到 VID `0x38F4`（SiFli）的任何设备**。
-也就是说芯片的 USB D+/D-（PA35/PA36，在 pinmux 里已配成 analog）根本没有接到可用的
-USB 口上——节点存在于固件里，物理通路不存在。
+| 口 | 接到哪 | 在 PC 上 |
+|---|---|---|
+| 口 A（带板载 USB 转串口芯片） | 板载 CH343 桥 → **UART1 控制台** + ROM 下载 | `1A86:55D3` → COM5 |
+| 口 B（USB2.0 FS） | **芯片原生 USB** → 固件里的 `/dev/ttyACM0` | 插上后应多出一个 COM 口 |
 
-板级 README 里"整板由片内 USB CDC ACM（VID `0x38F4`）+ USB 直供"这句话在本板上与
-实测不符，已在 3.3.2 的上游改进建议里记了一笔。
+固件里 `cdcacm_initialize()`（`sifli_ap.c:616`）会把片内 CDC ACM 注册成 `/dev/ttyACM0`，
+`ls /dev` 能看到。**这条口如果可用，就是免 USB-TTL、免接线的通路。**
 
-**结论：UART2 + USB-TTL 是唯一通路，没有免接线的替代方案。**
+### 路线 1（优先）：第二条 USB-C 线，走 `/dev/ttyACM0`
 
-## 接线
+```
+板子口 B ──USB-C 线── PC
+```
+
+插上后 Windows 设备列表里应多出一个 COM 口（VID `0x38F4`，SiFli）。然后：
+
+```
+nsh> pppd /dev/ttyACM0 115200 &     # USB CDC 的速率是名义值，真正快慢由 USB 决定
+```
+
+**说明**：截至本次适配，我们**还没有在物理上试过这条路线**——当时只插了口 A，
+Windows 里枚举不到任何 `0x38F4` 设备，于是先按口 A + 外部 USB-TTL 做完了全部验证。
+但软件侧已经核对过：`nuttx/drivers/usbdev/cdcacm.c` 实现了 `TCGETS`/`TCSETS`
+（且本工程已开 `CONFIG_SERIAL_TERMIOS`），所以 `pppd` 那条"先设速率再交接"的路径
+在 `/dev/ttyACM0` 上同样成立。
+
+**插上试一下只要一分钟**，成功的话整个接线环节就没了。
+
+### 路线 2（已验证软件链路）：USB-TTL 接 UART2
 
 USB-TTL 转接器三根线接到板子的 UART2：
 
@@ -210,10 +243,16 @@ ppp0    Link encap:UNSPEC  HWaddr ...
 nsh> ping 223.5.5.5
 ```
 
-`/dev/ttyS0` 就是 UART2：控制台占着 UART1，串口驱动注册其余口时会跳过它，
-所以 UART2 落到第一个空闲编号上。注意板子 README 的表格写的是
-`/dev/ttyS1`——那是 nsh 配置（多启用了一路 UART3）下的编号，本工程只启用了
+路线 2 用 `pppd /dev/ttyS0 460800 &`：`/dev/ttyS0` 就是 UART2——控制台占着 UART1，
+串口驱动注册其余口时会跳过它，所以 UART2 落到第一个空闲编号上。注意板子 README 的
+表格写的是 `/dev/ttyS1`，那是 nsh 配置（多启用了一路 UART3）下的编号；本工程只启用了
 UART1/UART2，实测就是 `ttyS0`。
+
+路线 1 用 `pppd /dev/ttyACM0 115200 &`：`/dev/ttyACM0` 是片内 USB CDC ACM，
+由 `cdcacm_initialize()` 注册（`sifli_ap.c:616`）。**USB CDC 的波特率是名义值**——
+真正快慢由 USB 决定，写多少都一样；之所以还要写，是因为 pppd 在交接前会走一遍
+`tcsetattr`，而 `cdcacm` 实现了 `TCSETS`（`nuttx/drivers/usbdev/cdcacm.c:2511`），
+所以任何值都能过。
 
 ### 别前台跑，也别随便动 RTS
 

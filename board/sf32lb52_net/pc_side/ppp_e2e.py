@@ -1,34 +1,41 @@
 #!/usr/bin/env python3
 """一条命令跑通板子的 PPP 链路（在 Windows 上运行）。
 
-把接线之后要做的四件事串起来：板子起 pppd → Windows 起串口桥 →
+把链路搭起来要做的四件事串成一步：板子起 pppd → Windows 起串口桥 →
 WSL 起 ppp0 + NAT → 从板子控制台验证。
 
-    [板子 UART2] --三根线--> [USB-TTL] --USB--> [COMx]
-                                                   |  serial_tcp_bridge.py
-                                                   |  TCP
-                                    WSL socat -> /tmp/ttyPPP -> pppd -> ppp0
-                                                                        |
-                                                          MASQUERADE -> eth0 -> 外网
+    [板子] ──串口── [COMx]
+                      |  serial_tcp_bridge.py
+                      |  TCP
+       WSL socat -> /tmp/ttyPPP -> pppd -> ppp0
+                                          |
+                            MASQUERADE -> eth0 -> 外网
+
+两条通路
+--------
+这个板子有两个 Type-C 口，任选其一承载 PPP：
+
+  路线 1（优先，免接线）
+      用第二条 USB-C 线接板子的「USB2.0 FS」口。那是芯片原生 USB，
+      固件把它注册成 /dev/ttyACM0。插上后 Windows 里会多出一个 COM 口。
+        python ppp_e2e.py --mode usb --port COM6
+
+  路线 2（软件链路已完整验证）
+      用 USB-TTL 转接器接板子 UART2：TX→PA20、RX→PA27、GND→GND。
+      板子侧是 /dev/ttyS0。
+        python ppp_e2e.py --mode usbttl --port COM8
 
 前提
 ----
-1. 已经接好线：USB-TTL 的 TX→板子 PA20、RX→PA27、GND→GND
-2. 板子上跑着含 pppd 的固件（ai_agent 那份就是）
-3. WSL 里装好 ppp 与 socat：
+1. 板子上跑着含 pppd 的固件（ai_agent 那份就是）
+2. WSL 里装好 ppp 与 socat：
      wsl.exe -d Ubuntu-24.04 -u root -e bash -lc 'apt-get install -y ppp socat'
-4. 板子的控制台串口（默认 COM5）没有被别的程序占着
-
-用法
-----
-    python ppp_e2e.py --usbttl COM8
-    python ppp_e2e.py --usbttl COM8 --console COM5 --baud 460800
-    python ppp_e2e.py --list
+3. 控制台串口（默认 COM5）没被别的程序占着
 
 说明
 ----
-本脚本把每一步的原始输出都打出来，不做"成功/失败"的黑箱判断——链路上
-任何一段出问题，都能从输出里看出是哪一段。板的控制台操作复用 nsh.py。
+每一步的原始输出都打出来，不做黑箱判断——链路上任何一段断了都能看出是哪一段。
+控制台操作复用 nsh.py 的交互方式。
 """
 
 import argparse
@@ -47,8 +54,23 @@ except ImportError:
 HERE = os.path.dirname(os.path.abspath(__file__))
 WSL_DISTRO = "Ubuntu-24.04"
 
-# 板子上的 UART2 在本工程的配置下注册为 ttyS0（UART1 是控制台，被跳过）
-BOARD_TTY = "/dev/ttyS0"
+# 两条通路的差异集中在这里
+MODES = {
+    # 芯片原生 USB CDC ACM。速率是名义值——真正快慢由 USB 决定，
+    # 但 pppd 仍会走一遍 tcsetattr，而 cdcacm 实现了 TCSETS，所以能过。
+    "usb": {
+        "board_tty": "/dev/ttyACM0",
+        "baud": 115200,
+        "hint": "板子的 USB2.0 FS 口（芯片原生 USB）",
+    },
+    # UART2 + USB-TTL。UART1 是控制台，串口驱动注册其余口时会跳过它，
+    # 所以本工程只启用 UART1/UART2 时 UART2 落在 ttyS0 上。
+    "usbttl": {
+        "board_tty": "/dev/ttyS0",
+        "baud": 460800,
+        "hint": "USB-TTL → 板子 UART2（TX→PA20、RX→PA27、GND→GND）",
+    },
+}
 
 
 def list_ports_briefly():
@@ -61,9 +83,10 @@ def list_ports_briefly():
         vidpid = f"{p.vid:04X}:{p.pid:04X}" if p.vid else "-"
         print(f"{p.device:<8} {vidpid:<12} {p.description}")
     print()
-    print("提示：板载的 USB-UART 桥是沁恒 CH343，VID:PID = 1A86:55D3")
-    print("      （它通到 UART1，也就是控制台，通常枚举为 COM5）。")
-    print("      USB-TTL 是另一个端口——找那个不是 1A86:55D3、也不是蓝牙的。")
+    print("提示：板载 CH343 桥（口 A，控制台）是 1A86:55D3，通常枚举为 COM5。")
+    print("      承载 PPP 的是另一个口：")
+    print("        --mode usb     找 VID:PID = 38F4:xxxx（SiFli，芯片原生 USB）")
+    print("        --mode usbttl  找 USB-TTL 那个（不是 1A86:55D3、也不是蓝牙）")
 
 
 def wsl(command, timeout=180):
@@ -74,7 +97,7 @@ def wsl(command, timeout=180):
 
 
 class Nsh:
-    """板子控制台（复用 nsh.py 的交互方式：CRLF 结尾，读到静默为止）"""
+    """板子控制台：写一行命令，读到线路静默为止"""
 
     IDLE = 0.6
     LIMIT = 30.0
@@ -111,32 +134,44 @@ def step(n, title):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--usbttl", help="USB-TTL 的串口，例如 COM8")
+    parser.add_argument("--mode", choices=sorted(MODES), default="usb",
+                        help="usb = 芯片原生 USB（免接线，先试这个）；"
+                             "usbttl = UART2 + USB-TTL（默认 usb）")
+    parser.add_argument("--port", help="承载 PPP 的那个串口，例如 COM6")
     parser.add_argument("--console", default="COM5", help="板子控制台串口（默认 COM5）")
-    parser.add_argument("--baud", type=int, default=460800,
-                        help="PPP 链路波特率（默认 460800，两侧必须一致）")
     parser.add_argument("--console-baud", type=int, default=1000000,
                         help="控制台波特率（本板固定 1000000）")
+    parser.add_argument("--board-tty", help="覆盖板子侧的设备节点")
+    parser.add_argument("--baud", type=int, help="覆盖链路波特率")
     parser.add_argument("--list", action="store_true", help="列出串口后退出")
     args = parser.parse_args()
 
-    if args.list or not args.usbttl:
+    if args.list or not args.port:
         list_ports_briefly()
         return 0 if args.list else 1
+
+    preset = MODES[args.mode]
+    board_tty = args.board_tty or preset["board_tty"]
+    baud = args.baud or preset["baud"]
+
+    print(f"通路：{preset['hint']}")
+    print(f"      板子侧 {board_tty}，链路 {baud} baud，桥接在 {args.port}")
 
     step(1, "在板子上后台起 pppd")
     nsh = Nsh(args.console, args.console_baud)
     print(nsh.run("uname -a").strip()[:200])
+    if args.mode == "usb":
+        print("→ 先确认板子认到了这个节点：")
+        print(nsh.run("ls /dev").strip()[-500:])
     print("→ pppd 必须后台跑：它不会返回，前台会把控制台整个占死")
-    print(nsh.run(f"pppd {BOARD_TTY} {args.baud} &").strip()[:400])
+    print(nsh.run(f"pppd {board_tty} {baud} &").strip()[:400])
     nsh.close()
 
-    step(2, "在 Windows 上把 USB-TTL 桥接到 TCP")
+    step(2, "在 Windows 上把串口桥接到 TCP")
     bridge = os.path.join(HERE, "serial_tcp_bridge.py")
-    print(f"→ 起 {os.path.basename(bridge)} {args.usbttl} {args.baud}")
+    print(f"→ 起 {os.path.basename(bridge)} {args.port} {baud}")
     bridge_proc = subprocess.Popen(
-        [sys.executable, "-u", bridge, args.usbttl, str(args.baud),
-         "--tcp-port", "5555"],
+        [sys.executable, "-u", bridge, args.port, str(baud), "--tcp-port", "5555"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     time.sleep(3)
     if bridge_proc.poll() is not None:
@@ -147,7 +182,7 @@ def main():
 
     step(3, "在 WSL 里起 ppp0 + NAT + MSS 夹取")
     rc, out = wsl(f"bash {HERE.replace(chr(92), '/')}/ppp_up.sh "
-                  f"127.0.0.1 5555 10.0.0.1 10.0.0.2 {args.baud}")
+                  f"127.0.0.1 5555 10.0.0.1 10.0.0.2 {baud}")
     print(out.strip()[-2000:])
     if rc != 0:
         print(f"→ ppp_up.sh 返回 {rc}，链路没起来。上面的日志能看出卡在哪一段。")
@@ -158,7 +193,7 @@ def main():
     nsh = Nsh(args.console, args.console_baud)
     print(nsh.run("ifconfig").strip()[-1200:])
     print()
-    print(nsh.run("ping 223.5.5.5", ).strip()[-1200:])
+    print(nsh.run("ping 223.5.5.5").strip()[-1200:])
     print()
     print("→ 之后在板子上跑 ai_agent，用 set_llm 写入 LLM 端点即可对话：")
     print("     nsh> ai_agent")
