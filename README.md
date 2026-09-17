@@ -62,6 +62,26 @@ CDC ACM 串口（也就是控制台）。开箱状态是 `CONFIG_NET` 关闭、�
 我们补上了这条缺失的传输层：**UART2 上跑 PPP**，PC 侧做网关。SLIP 走不通——Linux 5.14
 起移除了内核 SLIP 支持——所以用 PPP。
 
+### 对照「基于 openvela 开发的判定标准」
+
+大赛规定：项目须使用 **openvela 开源项目（NuttX 内核仓库除外）** 提供的系统能力，且至少
+落地**图形、AI、多媒体**三项核心能力之一。本作品逐项对照如下——
+
+| 用到的能力 | 所在仓库 | 是否 openvela | 在本作品中承担什么 |
+|---|---|---|---|
+| 板级适配（bringup / defconfig / CMake / 链接脚本） | `vendor/sifli` | ✅ vendor 仓 | 第 1 层的载体，也就是「新硬件平台适配」这条赛道的定义本身 |
+| 构建系统（`build/envsetup.sh`、cmake 模块、`lunch`/`m` 流程） | `build/` | ✅ build 仓 | 三层交付全部经它集成与验证 |
+| **AI Agent 框架 openvelaClaw** | `packages/ai_agent` | ✅ packages 仓 | **第 2 层：AI 能力落地** |
+| QuickApp / 应用框架脚手架 | `app/`、`quickapp/` | ✅ 组委会下发 | 应用侧扩展入口 |
+| LVGL 图形框架 + `lvgldemo` | `apps/graphics/lvgl` | ✅ apps 仓 | **图形能力**，可现场演示 |
+| NuttX 音频 lower-half 接口 | `nuttx/audio` | ⚠️ NuttX 仓（判定标准中排除） | 第 1 层的**实现接口**，不是成果本身 |
+
+关于最后一行需要说明清楚：音频驱动所依托的 `nuttx/audio` 接口确实属于被排除的 NuttX 内核仓，
+但**本作品的成果不是「调用了这个接口」**——是这块芯片的音频子系统此前在 openvela 上完全
+不存在，我们把它从零补了出来，并经 openvela 的 vendor 板级层与 build 构建系统交付。在此之上
+落地的 **AI（openvelaClaw，第 2 层）** 与 **图形（LVGL，板级已就绪、`lvgldemo` 可直接跑）**
+两项能力，加上可现场演示的音频采集，共同构成「至少落地三项核心能力之一」的实证。
+
 ---
 
 ## 三、真机验证结果
