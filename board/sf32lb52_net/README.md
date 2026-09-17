@@ -167,6 +167,21 @@ nsh> ping 223.5.5.5
 
 拆链路：`ppp_down.sh`。
 
+## 为什么不走片内 USB，非要外接一根线
+
+板子上其实还有一个串口：片内 USB CDC ACM，固件里 `cdcacm_initialize()` 会把它注册成
+`/dev/ttyACM0`（`ls /dev` 能看到）。如果能用它跑 PPP，就完全不需要 USB-TTL、也不需要接线。
+
+**实测走不通**：把板子插到 PC 上，Windows 的设备列表里只有板载 CH343 桥（`1A86:55D3`，
+枚举为 COM5，通到 UART1 控制台），**枚举不到 VID `0x38F4`（SiFli）的任何设备**。
+也就是说芯片的 USB D+/D-（PA35/PA36，在 pinmux 里已配成 analog）根本没有接到可用的
+USB 口上——节点存在于固件里，物理通路不存在。
+
+板级 README 里"整板由片内 USB CDC ACM（VID `0x38F4`）+ USB 直供"这句话在本板上与
+实测不符，已在 3.3.2 的上游改进建议里记了一笔。
+
+**结论：UART2 + USB-TTL 是唯一通路，没有免接线的替代方案。**
+
 ## 接线
 
 USB-TTL 转接器三根线接到板子的 UART2：
