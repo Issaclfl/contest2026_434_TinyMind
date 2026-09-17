@@ -200,6 +200,7 @@ static void on_ppp_got_ip(void *arg, esp_event_base_t base, int32_t id, void *da
     ESP_LOGI(TAG, "session %u up: we are " IPSTR ", board is %s",
              s_sessions, IP2STR(&ev->ip_info.ip), CONFIG_GATEWAY_PPP_PEER_IP);
 
+#if CONFIG_GATEWAY_UPLINK
     /* NAPT belongs on the PPP interface, not the Wi-Fi one: esp_netif's own
      * guide is to enable it on the interface facing the target network, and
      * the implementation switches NAPT off on every other interface.  It fails
@@ -212,6 +213,10 @@ static void on_ppp_got_ip(void *arg, esp_event_base_t base, int32_t id, void *da
         ESP_LOGE(TAG, "NAPT failed (%s): the board can reach us but not the internet",
                  esp_err_to_name(err));
     }
+#else
+    ESP_LOGW(TAG, "GATEWAY_UPLINK is off, so NAPT is deliberately not enabled: "
+                  "the board can reach this device but not the internet");
+#endif
 
     xEventGroupSetBits(s_ppp_events, PPP_UP_BIT);
 }

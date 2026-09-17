@@ -60,8 +60,11 @@ void app_main(void)
         return;
     }
 
-    /* The uplink has to be up first: the PPP interface is the inside of the
-     * NAT, and an inside with no outside would only mislead. */
+    /* The uplink normally has to be up first: the PPP interface is the inside
+     * of the NAT, and an inside with no outside would only mislead.  With
+     * GATEWAY_UPLINK off this is the bench test of the PPP link alone, so the
+     * Wi-Fi step is skipped on purpose. */
+#if CONFIG_GATEWAY_UPLINK
     err = net_wifi_start(WIFI_WAIT_MS);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "no Wi-Fi uplink (%s); not starting the PPP server -- "
@@ -69,6 +72,11 @@ void app_main(void)
                  esp_err_to_name(err));
         return;
     }
+#else
+    ESP_LOGW(TAG, "GATEWAY_UPLINK is off: PPP only, no Wi-Fi and no NAPT.");
+    ESP_LOGW(TAG, "the board will reach this device and stop there -- use it to test "
+                  "whether the two PPP implementations negotiate, nothing else.");
+#endif
 
     err = net_ppp_start();
     if (err != ESP_OK) {

@@ -1,5 +1,16 @@
 menu "SF32LB52 gateway"
 
+    config GATEWAY_UPLINK
+        bool "Bring up Wi-Fi and NAT the board out to the internet"
+        default y
+        help
+            Turn this off to bench-test the PPP link on its own: the gateway
+            then runs the PPP server with no Wi-Fi and no NAPT, which is how
+            you tell "the peer does not negotiate PPP with us" apart from
+            "NAT is not routing it".  In that mode the board can reach this
+            device but nothing beyond it unless something else (for example
+            the PC-side ppp_up.sh) provides the route out.
+
     config GATEWAY_WIFI_SSID
         string "Wi-Fi SSID"
         default ""
