@@ -55,11 +55,13 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
-/* Supported capture formats (M1 report; M3 narrows to what we program). */
+/* Sample rates we actually program: both families derive from the 48MHz
+ * XTAL via g_adc_clk_xtal[] / g_dac_clk_xtal[] / g_audprc_div_xtal[].
+ * Advertise only these - the hardware layer rejects anything else with
+ * -EINVAL, so claiming 8K/44.1K here would contradict configure(). */
 
 #define SF32LB52_AUDIO_SAMPRATES                                                \
-  (AUDIO_SAMP_RATE_8K | AUDIO_SAMP_RATE_16K | AUDIO_SAMP_RATE_44K |             \
-   AUDIO_SAMP_RATE_48K)
+  (AUDIO_SAMP_RATE_16K | AUDIO_SAMP_RATE_48K)
 
 /* NuttX FEATURE gain scale is 0..1000; our PGA range is 0..30dB. */
 
@@ -678,8 +680,51 @@ static int sf32lb52_resume(FAR struct audio_lowerhalf_s *dev)
 {
   FAR struct sf32lb52_audio_s *priv =
     (FAR struct sf32lb52_audio_s *)dev;
+  int ret;
 
   _info("resume\n");
+
+  if (!priv->configured)
+    {
+      return -EAGAIN;
+    }
+
+  /* pause() calls hw_stop(), which is destructive by design: it zeroes the
+   * AUDPRC RX channel config (HAL_AUDPRC_Clear_Adc_Channel), soft-resets the
+   * whole AUDPRC block (__HAL_AUDPRC_SRESET_START - which also drops the
+   * sample-rate divider) and clears the codec ADC channel.  Re-arming the DMA
+   * alone therefore leaves a channel that AUDPRC no longer feeds: Receive_DMA
+   * returns HAL_OK, not one half-complete interrupt ever fires, and the
+   * recording stops growing exactly where it was paused.
+   *
+   * So resume has to rebuild the stream the same way a fresh CONFIGURE+START
+   * pair does - re-program the cached geometry first, then start. */
+
+  ret = (priv->dir == SF32LB52_AUDIO_CAPTURE)
+          ? sf32lb52_audio_hw_config_capture(priv->samprate, priv->nchannels,
+                                             priv->bpsamp)
+          : sf32lb52_audio_hw_config_playback(priv->samprate, priv->nchannels,
+                                              priv->bpsamp);
+  if (ret != OK)
+    {
+      _err("resume: reconfigure failed: %d\n", ret);
+      return ret;
+    }
+
+  /* Playback has to refill the staging halves from pendq before the transmit
+   * DMA is armed; capture needs no priming (see sf32lb52_start). */
+
+  if (priv->dir == SF32LB52_AUDIO_PLAYBACK)
+    {
+      sf32lb52_prime_playback(priv);
+    }
+
+  ret = sf32lb52_audio_hw_start(priv->dir, NULL, 0);
+  if (ret != OK)
+    {
+      return ret;
+    }
+
   priv->running = true;
   return OK;
 }

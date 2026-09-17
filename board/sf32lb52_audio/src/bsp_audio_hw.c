@@ -799,6 +799,14 @@ int sf32lb52_audio_hw_stop(uint8_t dir)
       /* Reverse of start: AUDPRC first, then codec digital, then analog. */
 
       HAL_AUDPRC_DMAStop(&g_audprc, HAL_AUDPRC_RX_CH0);
+
+      /* The vendor's DMAStop has its state reset commented out
+       * (bf0_hal_audprc.c, "//haprc->State = HAL_AUDPRC_STATE_READY;"),
+       * so BUSY_RX survives the session and the next Receive_DMA returns
+       * HAL_BUSY forever after.  Clear it here - State is __IO and indexed
+       * per channel, and Receive_DMA sets it unconditionally on start. */
+
+      g_audprc.State[HAL_AUDPRC_RX_CH0] = HAL_AUDPRC_STATE_READY;
       hw_dma_irq_detach(SF32LB52_AUDIO_CAPTURE);
       g_dma_on[SF32LB52_AUDIO_CAPTURE] = false;
 
@@ -830,7 +838,13 @@ int sf32lb52_audio_hw_stop(uint8_t dir)
       sf32lb52_audio_hw_pa(false);
       HAL_AUDCODEC_Config_DACPath(&g_audcodec, 1);      /* mute */
 
-      HAL_AUDCODEC_DMAStop(&g_audprc, HAL_AUDPRC_TX_CH0);
+      /* Stop the AUDPRC TX channel - NOT the codec's DMAStop: that takes a
+       * codec handle, and passing an AUDPRC handle to it only "worked"
+       * because C does not type-check across the two HALs.  Same vendor
+       * state-reset omission as the RX side, so clear BUSY_TX here too. */
+
+      HAL_AUDPRC_DMAStop(&g_audprc, HAL_AUDPRC_TX_CH0);
+      g_audprc.State[HAL_AUDPRC_TX_CH0] = HAL_AUDPRC_STATE_READY;
       hw_dma_irq_detach(SF32LB52_AUDIO_PLAYBACK);
       g_dma_on[SF32LB52_AUDIO_PLAYBACK] = false;
 

@@ -192,6 +192,13 @@ int sf32lb52_audio_hw_start(uint8_t dir, uint8_t *buf, uint32_t len);
  *   Tear the stream down in the exact reverse (anti-pop) order and detach
  *   the DMA interrupt.
  *
+ *   NOTE: this is destructive, not a gate.  It clears the AUDPRC channel
+ *   config, soft-resets the AUDPRC block (which also drops the sample-rate
+ *   divider) and clears the codec channel, so the next
+ *   sf32lb52_audio_hw_start() would arm a channel nothing feeds unless
+ *   config_capture()/config_playback() is called again first.  sf32lb52_resume()
+ *   in bsp_audio.c does exactly that.
+ *
  * Input Parameters:
  *   dir - Stream direction to stop.
  *

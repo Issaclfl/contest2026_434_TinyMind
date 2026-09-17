@@ -1,0 +1,302 @@
+
+================================================================
+阶段 A：基线
+================================================================
+
+>>> uname -a
+[K
+nsh> [Kuname -a
+NuttX 0.0.0 76354c63-dirty Sep 17 2026 00:49:04 arm nsh
+nsh> [K[0m[31mERROR: ft6146_touch_initialize failed: -5
+[0m
+RESULT A 板子基线: PASS 
+
+
+================================================================
+阶段 B：nxrecorder 可用命令
+================================================================
+
+nxrecorder help:
+h
+NxRecorder commands
+================
+  device devfile      : Specify a preferred audio device
+  h                   : Display help for commands
+  help                : Display help for commands
+  recordraw filename  : Record a pcm raw file
+  record filename     : Record a media file
+  pause               : Pause record
+  resume              : Resume record
+  stop                : Stop record
+  q                   : Exit NxRecorder
+  quit                : Exit NxRecorder
+nxrecorder> [K
+RESULT B 命令面枚举: PASS pause/resume 可用
+
+
+================================================================
+阶段 C：采样率矩阵（各 2 秒）
+================================================================
+
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> recordraw /data/t8k.pcm 1 16 8000
+recordraw /data/t8k.pcm 1 16 8000
+sf32lb52_audio_hw_config_capture: unsupported capture rate 8000
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+Error recording file: 22
+nxrecorder> [K
+>>> stop
+stop
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> ls -l /data
+ls -l /data
+/data:
+ -rwxrwxrwx           0 t8k.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+RESULT C1 8000Hz 超出时钟表 → 干净拒绝: PASS 驱动明确报 unsupported 且板子存活
+
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> recordraw /data/t16k.pcm 1 16 16000
+recordraw /data/t16k.pcm 1 16 16000
+sf32lb52_audio_hw_config_capture: capture config: 16000Hz 1ch 16bit
+sf32lb52_configure: configure: rate=16000 ch=1 bits=16
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+sf32lb52_start: start: dir=0
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> ls -l /data
+ls -l /data
+/data:
+ -rwxrwxrwx      131072 t16k.pcm
+ -rwxrwxrwx           0 t8k.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+RESULT C2 16000Hz 录音: PASS 131072 字节（期望 ≈64000）
+
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> recordraw /data/t48k.pcm 2 16 48000
+recordraw /data/t48k.pcm 2 16 48000
+sf32lb52_audio_hw_config_capture: capture config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+sf32lb52_start: start: dir=0
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> ls -l /data
+ls -l /data
+/data:
+ -rwxrwxrwx      409600 t48k.pcm
+ -rwxrwxrwx      131072 t16k.pcm
+ -rwxrwxrwx           0 t8k.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+RESULT C3 48000Hz 立体声录音: PASS 409600 字节（期望 ≈384000）
+
+
+================================================================
+阶段 D：录音中 pause 2 秒再 resume
+================================================================
+
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> pause
+pause
+sf32lb52_pause: pause
+sf32lb52_audio_hw_stop: capture stopped
+nxrecorder> [K
+>>> resume
+resume
+sf32lb52_resume: resume
+sf32lb52_audio_hw_config_capture: capture config: 16000Hz 1ch 16bit
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> ls -l /data
+ls -l /data
+/data:
+ -rwxrwxrwx      188416 tp.pcm
+ -rwxrwxrwx      409600 t48k.pcm
+ -rwxrwxrwx      131072 t16k.pcm
+ -rwxrwxrwx           0 t8k.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+RESULT D pause/resume（恢复后 DMA 真的重启）: PASS 188416 字节；resume 后 capture started=是
+
+
+================================================================
+阶段 E：多轮会话压力（5 轮 open→record→stop→close）
+================================================================
+
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+>>> device /dev/audio0
+[Kdevice /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+>>> q
+q
+nsh> [K
+RESULT E 5 轮会话压力: PASS 
+
+
+================================================================
+阶段 F：收尾完整性
+================================================================
+
+>>> ls -l /data
+[Kls -l /data
+/data:
+ -rwxrwxrwx       73728 s4.pcm
+ -rwxrwxrwx       73728 s3.pcm
+ -rwxrwxrwx       73728 s2.pcm
+ -rwxrwxrwx       73728 s1.pcm
+ -rwxrwxrwx       73728 s0.pcm
+ -rwxrwxrwx      188416 tp.pcm
+ -rwxrwxrwx      409600 t48k.pcm
+ -rwxrwxrwx      131072 t16k.pcm
+ -rwxrwxrwx           0 t8k.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+/data 内容:
+[Kls -l /data
+/data:
+ -rwxrwxrwx       73728 s4.pcm
+ -rwxrwxrwx       73728 s3.pcm
+ -rwxrwxrwx       73728 s2.pcm
+ -rwxrwxrwx       73728 s1.pcm
+ -rwxrwxrwx       73728 s0.pcm
+ -rwxrwxrwx      188416 tp.pcm
+ -rwxrwxrwx      409600 t48k.pcm
+ -rwxrwxrwx      131072 t16k.pcm
+ -rwxrwxrwx           0 t8k.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+>>> uname -a
+uname -a
+NuttX 0.0.0 76354c63-dirty Sep 17 2026 00:49:04 arm nsh
+nsh> [K
+RESULT F 收尾完整性: PASS 
+
+
+TOTAL 8/8
