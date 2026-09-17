@@ -1,0 +1,25 @@
+=== ai_agent 反复启停的堆占用（验证有无泄漏）===
+nsh> free
+free
+      total       used       free    maxused    maxfree  nused  nfree name
+    8743504    2098576    6644928    2205864    6357184    231     14 Umem
+nsh> [K
+基线          : 2098576
+nsh> free
+free
+      total       used       free    maxused    maxfree  nused  nfree name
+    8743504    2098576    6644928    2205864    6357184    231     14 Umem
+nsh> [K
+第 1 次启停后: 2098576
+nsh> free
+free
+      total       used       free    maxused    maxfree  nused  nfree name
+    8743504    2098576    6644928    2205864    6357184    231     14 Umem
+nsh> [K
+第 2 次启停后: 2098576
+nsh> free
+free
+      total       used       free    maxused    maxfree  nused  nfree name
+    8743504    2098576    6644928    2205864    6357184    231     14 Umem
+nsh> [K
+第 3 次启停后: 2098576

@@ -1,0 +1,74 @@
+nsh> uname -a
+uname -a
+NuttX  0.0.0 76354c63-dirty Sep 17 2026 23:11:50 arm nsh
+nsh> [K
+nsh> ls /dev
+ls /dev
+/dev:
+ adc0
+ audio0
+ buttons
+ config0
+ console
+ fb0
+ gpio0
+ gpio1
+ gpio2
+ i2c0
+ i2c1
+ lcd0
+ mmcsd0
+ net/
+ null
+ pwm0
+ ram0
+ rtc0
+ spi1
+ timer0
+ ttyACM0
+ ttyS0
+ tun
+ urandom
+ watchdog0
+nsh> [K
+nsh> nxrecorder
+nxrecorder
+NxRecorder version 1.00
+h for commands, q to exit
+
+nxrecorder> [K
+nsh> device /dev/audio0
+device /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+nsh> recordraw /data/regress.pcm
+recordraw /data/regress.pcm
+sf32lb52_audio_hw_config_capture: capture config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+sf32lb52_start: start: dir=0
+nxrecorder> [K
+nsh> stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+nsh> q
+q
+nsh> [K
+nsh> ls -l /data
+ls -l /data
+/data:
+ -rwxrwxrwx      745472 regress2.pcm
+ -rwxrwxrwx      933888 regress.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+nsh> free
+free
+      total       used       free    maxused    maxfree  nused  nfree name
+    8743504    2081864    6661640    2132768    6357184    159      9 Umem
+nsh> [K

@@ -73,7 +73,7 @@ CDC ACM 串口（也就是控制台）。开箱状态是 `CONFIG_NET` 关闭、�
 | 构建系统（`build/envsetup.sh`、cmake 模块、`lunch`/`m` 流程） | `build/` | ✅ build 仓 | 三层交付全部经它集成与验证 |
 | **AI Agent 框架 openvelaClaw** | `packages/ai_agent` | ✅ packages 仓 | **第 2 层：AI 能力落地** |
 | QuickApp / 应用框架脚手架 | `app/`、`quickapp/` | ✅ 组委会下发 | 应用侧扩展入口 |
-| LVGL 图形框架 + `lvgldemo` | `apps/graphics/lvgl` | ✅ apps 仓 | **图形能力**，可现场演示 |
+| LVGL 图形框架 + `lvgldemo` | `apps/graphics/lvgl` | ✅ apps 仓 | **图形能力**；`lvgldemo`、`fb` 均已在固件中确认为内置命令 |
 | NuttX 音频 lower-half 接口 | `nuttx/audio` | ⚠️ NuttX 仓（判定标准中排除） | 第 1 层的**实现接口**，不是成果本身 |
 
 关于最后一行需要说明清楚：音频驱动所依托的 `nuttx/audio` 接口确实属于被排除的 NuttX 内核仓，
@@ -105,6 +105,8 @@ CDC ACM 串口（也就是控制台）。开箱状态是 `CONFIG_NET` 关闭、�
 | 运行期内存 | `free` 报 Umem 总量 **8.7 MB**（512 KB SRAM + 8 MB PSRAM，`CONFIG_MM_REGIONS=2`） |
 | 板子实跑 | `ai_agent` 启动完成，**36 个工具**注册、Skills 装载、`set_llm` 写入成功 |
 | 注册为 NSH 内置命令 | `{ "ai_agent", 100, 32768, ai_agent_main }`，栈 32 KB |
+| **音频回归**（新增网络配置是否碰坏音频） | Agent 固件上跑 `nxrecorder` 两轮，落盘 933,888 / 745,472 字节，**两轮 `overruns=0`** |
+| **堆占用稳定性**（是否泄漏） | 连跑三次 Agent 启停，堆占用均为 2,098,576 字节，**完全一致 → 无泄漏**；总堆 8.7 MB 余 6.6 MB |
 
 ### IP 承载（第 3 层）
 
