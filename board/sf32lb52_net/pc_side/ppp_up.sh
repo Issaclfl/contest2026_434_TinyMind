@@ -120,7 +120,9 @@ setsid pppd "$PTY_LINK" "$BAUD" "$LOCAL_IP:$REMOTE_IP" \
   >"$PPP_LOG" 2>&1 &
 
 # ---------- 5. 等链路起来 ----------------------------------------------------
-for _ in $(seq 1 60); do
+# 板子的 pppd 会反复拒绝 CCP / IPv6CP，一来一回要花些时间；30 秒偶尔不够，
+# 给到 90 秒。等不到也不拆链路，好让下一次重试能接上。
+for _ in $(seq 1 180); do
   if ip -4 addr show "$PPP_IF" 2>/dev/null | grep -q "inet "; then
     say "链路已建立："
     ip -4 addr show "$PPP_IF" | sed 's/^/         /'

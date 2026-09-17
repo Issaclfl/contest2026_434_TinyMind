@@ -158,7 +158,21 @@ def main():
     parser.add_argument("--board-tty", help="覆盖板子侧的设备节点")
     parser.add_argument("--baud", type=int, help="覆盖链路波特率")
     parser.add_argument("--list", action="store_true", help="列出串口后退出")
+    parser.add_argument("--stop", action="store_true",
+                        help="拆掉链路：停掉串口桥并清掉 WSL 侧的 ppp0 与规则")
     args = parser.parse_args()
+
+    if args.stop:
+        rc, out = wsl(f'bash "{to_wsl_path(HERE)}/ppp_down.sh"')
+        print(out.strip())
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*serial_tcp_bridge*' } | "
+             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+            capture_output=True)
+        print("串口桥已停")
+        return rc
 
     if args.list or not args.port:
         list_ports_briefly()
@@ -193,16 +207,24 @@ def main():
 
     step(2, "在 Windows 上把串口桥接到 TCP")
     bridge = os.path.join(HERE, "serial_tcp_bridge.py")
+    bridge_log = os.path.join(HERE, "bridge.log")
     print(f"→ 起 {os.path.basename(bridge)} {args.port} {baud}")
+
+    # 桥必须活得比本脚本久。若把它的 stdout 接成管道，本脚本一退出管道就断，
+    # 桥写日志时报错退出，WSL 侧的 socat 随即失去对端、ppp0 消失——链路会
+    # 看起来"刚建好就断"。所以日志写文件，并让它脱离本进程。
+    log_fh = open(bridge_log, "w")
     bridge_proc = subprocess.Popen(
         [sys.executable, "-u", bridge, args.port, str(baud), "--tcp-port", "5555"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        stdout=log_fh, stderr=subprocess.STDOUT,
+        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
     time.sleep(3)
     if bridge_proc.poll() is not None:
         print("桥启动失败：")
-        print(bridge_proc.stdout.read())
+        with open(bridge_log, encoding="utf-8", errors="replace") as fh:
+            print(fh.read())
         return 1
-    print("桥已在后台运行（本脚本退出前一直有效）")
+    print(f"桥已常驻（pid {bridge_proc.pid}，日志 {bridge_log}）")
 
     step(3, "在 WSL 里起 ppp0 + NAT + MSS 夹取")
     # 宿主地址留空，交给 ppp_up.sh 自己探测：桥在 Windows 上，而 WSL 里的
@@ -230,9 +252,8 @@ def main():
 
     print()
     print("━━━ 完成 " + "━" * 46)
-    print("拆链路：wsl.exe -d %s -u root -e bash -lc 'bash %s/ppp_down.sh'"
-          % (WSL_DISTRO, to_wsl_path(HERE)))
-    print("（本脚本退出不会关掉桥；要停它请结束对应的 python 进程）")
+    print("拆链路：python ppp_e2e.py --stop")
+    print("（链路建好后可以放心退出本脚本：桥与 ppp0 都会继续存在）")
     return 0
 
 

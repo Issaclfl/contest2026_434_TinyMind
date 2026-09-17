@@ -1,0 +1,313 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f1b6b4a..8ee96ab 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -53,6 +53,7 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
+     src/tools/tool_system.c
+     src/tools/tool_health.c
+     src/tools/tool_control.c
++    src/tools/tool_board.c
+     src/tools/tool_media.c
+     src/tools/tool_proxyquickapp.c
+     src/tools/skill_loader.c
+diff --git a/src/tools/tool_board.c b/src/tools/tool_board.c
+new file mode 100644
+index 0000000..e0b102f
+--- /dev/null
++++ b/src/tools/tool_board.c
+@@ -0,0 +1,202 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/* tool_board.c - Acting on and sensing the board itself.
++ *
++ * The other 36 built-in tools either talk to the network or poke at files.
++ * These two are wired to hardware: the LCD backlight is a real PWM output on
++ * this board, and the keys are real GPIO inputs.  That is the difference
++ * between an agent that can describe a device and one that can change it.
++ *
++ * Device nodes (SF32LB52-DevKit-LCD):
++ *   /dev/pwm0     - GPTIM1_CH4 on PA01, wired to the LCD backlight
++ *   /dev/buttons  - KEY2 on PA11, reported as bit 0
++ */
++
++#include "tools/tool_board.h"
++#include "agent_compat.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <syslog.h>
++#include <unistd.h>
++
++#include <nuttx/input/buttons.h>
++#include <nuttx/timers/pwm.h>
++
++#include "cJSON.h"
++
++static const char *TAG = "tool_board";
++
++#define BACKLIGHT_DEV   "/dev/pwm0"
++#define BUTTONS_DEV     "/dev/buttons"
++
++/* Above flicker fusion, and low enough that the 16-bit prescaler divides it
++ * cleanly from the GPT clock. */
++
++#define BACKLIGHT_FREQ  1000
++
++/* The board reports one key, as bit 0. */
++
++#define BOARD_BUTTON_KEY2  (1u << 0)
++
++/****************************************************************************
++ * Name: tool_set_backlight_execute
++ *
++ * Description:
++ *   Drive the LCD backlight PWM.  level is a percentage, 0 (off) to 100.
++ *
++ ****************************************************************************/
++
++int tool_set_backlight_execute(const char *input_json, char *output,
++                               size_t output_size)
++{
++  struct pwm_info_s info;
++  int level = -1;
++  int fd;
++  int ret;
++
++  cJSON *root = cJSON_Parse(input_json);
++  if (root != NULL)
++    {
++      cJSON *item = cJSON_GetObjectItem(root, "level");
++      if (item != NULL && cJSON_IsNumber(item))
++        {
++          level = (int)item->valuedouble;
++        }
++
++      cJSON_Delete(root);
++    }
++
++  if (level < 0)
++    {
++      level = 0;
++    }
++
++  if (level > 100)
++    {
++      level = 100;
++    }
++
++  fd = open(BACKLIGHT_DEV, O_RDWR);
++  if (fd < 0)
++    {
++      syslog(LOG_ERR, "%s: open %s failed: %d\n", TAG, BACKLIGHT_DEV, errno);
++      snprintf(output, output_size,
++               "{\"error\":\"cannot open %s: %d\"}", BACKLIGHT_DEV, errno);
++      return ERROR;
++    }
++
++  memset(&info, 0, sizeof(info));
++  info.frequency = BACKLIGHT_FREQ;
++  info.duty = (ub16_t)(((uint32_t)level * 65535u) / 100u);
++
++  ret = ioctl(fd, PWMIOC_SETCHARACTERISTICS, (unsigned long)(uintptr_t)&info);
++  if (ret < 0)
++    {
++      syslog(LOG_ERR, "%s: SETCHARACTERISTICS failed: %d\n", TAG, errno);
++      close(fd);
++      snprintf(output, output_size,
++               "{\"error\":\"set characteristics failed: %d\"}", errno);
++      return ERROR;
++    }
++
++  ret = ioctl(fd, PWMIOC_START, 0);
++  if (ret < 0)
++    {
++      syslog(LOG_ERR, "%s: START failed: %d\n", TAG, errno);
++      close(fd);
++      snprintf(output, output_size,
++               "{\"error\":\"start failed: %d\"}", errno);
++      return ERROR;
++    }
++
++  /* The output keeps running after close: pwm_close() only drops a reference. */
++
++  close(fd);
++
++  syslog(LOG_INFO, "%s: backlight set to %d%%\n", TAG, level);
++  snprintf(output, output_size,
++           "{\"ok\":true,\"level\":%d,\"frequency_hz\":%d}", level,
++           BACKLIGHT_FREQ);
++  return OK;
++}
++
++/****************************************************************************
++ * Name: tool_read_buttons_execute
++ *
++ * Description:
++ *   Read the current state of the board's keys.  btn_read() returns the
++ *   state immediately rather than waiting for an event, so this is a plain
++ *   sample of the GPIO inputs.
++ *
++ ****************************************************************************/
++
++int tool_read_buttons_execute(const char *input_json, char *output,
++                              size_t output_size)
++{
++  btn_buttonset_t supported = 0;
++  btn_buttonset_t state = 0;
++  bool key2_pressed;
++  int fd;
++
++  (void)input_json;
++
++  fd = open(BUTTONS_DEV, O_RDONLY);
++  if (fd < 0)
++    {
++      syslog(LOG_ERR, "%s: open %s failed: %d\n", TAG, BUTTONS_DEV, errno);
++      snprintf(output, output_size,
++               "{\"error\":\"cannot open %s: %d\"}", BUTTONS_DEV, errno);
++      return ERROR;
++    }
++
++  if (ioctl(fd, BTNIOC_SUPPORTED, (unsigned long)(uintptr_t)&supported) < 0)
++    {
++      supported = 0;
++    }
++
++  if (read(fd, &state, sizeof(state)) != (ssize_t)sizeof(state))
++    {
++      syslog(LOG_ERR, "%s: read %s failed: %d\n", TAG, BUTTONS_DEV, errno);
++      close(fd);
++      snprintf(output, output_size,
++               "{\"error\":\"read %s failed: %d\"}", BUTTONS_DEV, errno);
++      return ERROR;
++    }
++
++  close(fd);
++
++  key2_pressed = (state & BOARD_BUTTON_KEY2) != 0;
++
++  syslog(LOG_INFO, "%s: buttons supported=0x%02x state=0x%02x\n", TAG,
++        (unsigned)supported, (unsigned)state);
++
++  /* Report both the raw mask and a plain-language summary: the model reasons
++   * better about "KEY2 is pressed" than about bit 0. */
++
++  snprintf(output, output_size,
++           "{\"ok\":true,\"supported_mask\":%u,\"state_mask\":%u,"
++           "\"key2\":\"%s\",\"summary\":\"%s\"}",
++           (unsigned)supported, (unsigned)state,
++           key2_pressed ? "pressed" : "released",
++           key2_pressed ? "KEY2 is being pressed right now"
++                        : "no key is pressed (KEY2 is released)");
++  return OK;
++}
+diff --git a/src/tools/tool_board.h b/src/tools/tool_board.h
+new file mode 100644
+index 0000000..5ba618c
+--- /dev/null
++++ b/src/tools/tool_board.h
+@@ -0,0 +1,31 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/* Board actuators and sensors.
++ *
++ * These are the tools that let the agent act on the device it runs on rather
++ * than only talk about it: the LCD backlight is a real PWM output, and the
++ * keys are real GPIO inputs.  Board-specific by nature -- the device paths
++ * below are the ones the SF32LB52-DevKit-LCD registers. */
++
++#pragma once
++
++#include <stddef.h>
++
++int tool_set_backlight_execute(const char *input_json, char *output,
++                               size_t output_size);
++int tool_read_buttons_execute(const char *input_json, char *output,
++                              size_t output_size);
+diff --git a/src/tools/tool_registry.c b/src/tools/tool_registry.c
+index 33583e7..97b4822 100644
+--- a/src/tools/tool_registry.c
++++ b/src/tools/tool_registry.c
+@@ -27,6 +27,7 @@
+ #endif
+ #include "tools/tool_guard.h"
+ #include "tools/tool_control.h"
++#include "tools/tool_board.h"
+ #include "tools/tool_cron.h"
+ #include "tools/tool_feishu_chat.h"
+ #include "tools/tool_feishu_doc.h"
+@@ -368,6 +369,27 @@ int tool_registry_init(void)
+             TOOL_SCHEMA_END(),
+         tool_vibrate_execute);
+ 
++    /* Board tools.  Every other tool either talks to the network or pokes at
++     * files; these two are wired to hardware the agent is sitting on -- a PWM
++     * output driving the LCD backlight and a GPIO input reading the keys. */
++
++    REGISTER_TOOL(
++        "set_backlight",
++        "Set the LCD backlight brightness as a percentage: 0 turns it off, "
++        "100 is brightest. Use this when the user asks to dim, brighten or "
++        "turn off the screen.",
++        TOOL_SCHEMA_BEGIN()
++            TOOL_PARAM_NUM("level", "Brightness 0-100")
++            TOOL_SCHEMA_END_REQUIRED("\"level\""),
++        tool_set_backlight_execute);
++
++    REGISTER_TOOL_NO_PARAMS(
++        "read_buttons",
++        "Read the board's physical keys. Reports whether the key is being "
++        "held down right now. Use this when the user asks about the buttons "
++        "or wants to know if one is pressed.",
++        tool_read_buttons_execute);
++
+     /* Feishu document tools */
+     REGISTER_TOOL(
+         "feishu_doc_create",
+@@ -526,6 +548,15 @@ void tool_registry_cleanup(void)
+     free(s_tools_json);
+     s_tools_json = NULL;
+     s_tool_count = 0;
++
++    /* Mark the cache dirty again.  Without this, a second run of the agent in
++     * the same boot re-registers every tool but build_tools_json_locked()
++     * early-returns (the dirty flag was cleared by the first build), leaving
++     * s_tools_json NULL -- so the model is sent a request with no tools at
++     * all.  The first run after a boot works; every later one silently loses
++     * the whole toolset. */
++
++    s_tools_dirty = true;
+     pthread_mutex_unlock(&s_tools_mtx);
+ }
+ 
