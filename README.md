@@ -232,23 +232,21 @@ sftool -c SF32LB52 -p COM5 -b 1000000 \
 
 ### IP 承载（第 3 层）
 
-先把 USB-TTL 接到板子 UART2（**PA20=RX / PA27=TX / GND**），然后：
+这块板有两个 Type-C 口，承载 PPP 的串口有两条通路可选。**先试免接线的那条**：
 
 ```bash
-# 1) 板子：后台起 pppd（前台跑会占死控制台）
-nsh> pppd /dev/ttyS0 460800 &
+# 路线 1（优先）：第二条 USB-C 线接板子的 USB2.0 FS 口（芯片原生 USB）
+python ppp_e2e.py --mode usb    --port COM6
 
-# 2) Windows：把 USB-TTL 的 COM 口挂到 TCP 上
-python serial_tcp_bridge.py COM7 460800
+# 路线 2（软件链路已完整验证）：USB-TTL 接 UART2（TX→PA20 / RX→PA27 / GND→GND）
+python ppp_e2e.py --mode usbttl --port COM8
 
-# 3) WSL：起 ppp0 + NAT + MSS 夹取（宿主地址自动探测）
-wsl.exe -d Ubuntu-24.04 -u root -e bash -lc \
-  'bash <repo>/board/sf32lb52_net/pc_side/ppp_up.sh'
-
-# 4) 板子上验证
-nsh> ifconfig          # ppp0 应拿到 10.0.0.2
-nsh> ping 223.5.5.5
+# 不确定哪个口是哪个：
+python ppp_e2e.py --list
 ```
+
+`ppp_e2e.py` 把四步串成一条命令：板子后台起 `pppd` → Windows 起串口桥 →
+WSL 起 `ppp0` + NAT + MSS 夹取 → 从板子控制台验证 `ifconfig` 与 `ping`。
 
 之后在 `vela>` 里 `set_llm <host> <model> <key>` 写入端点即可对话。
 

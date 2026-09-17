@@ -1,0 +1,74 @@
+通路：板子的 USB2.0 FS 口（芯片原生 USB）
+      板子侧 /dev/ttyACM0，链路 115200 baud，桥接在 COM9
+
+━━━ 步骤 1：在板子上后台起 pppd ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+uname -a
+NuttX  0.0.0 76354c63-dirty Sep 17 2026 23:11:50 arm nsh
+nsh> [K
+→ 先确认板子认到了这个节点：
+ls /dev
+/dev:
+ adc0
+ audio0
+ buttons
+ config0
+ console
+ fb0
+ gpio0
+ gpio1
+ gpio2
+ i2c0
+ i2c1
+ lcd0
+ mmcsd0
+ net/
+ null
+ pwm0
+ ram0
+ rtc0
+ spi1
+ timer0
+ ttyACM0
+ ttyS0
+ tun
+ urandom
+ watchdog0
+nsh> [K
+→ pppd 必须后台跑：它不会返回，前台会把控制台整个占死
+pppd /dev/ttyACM0 115200 &
+pppd [8:100]
+nsh> [Kpppd: /dev/ttyACM0 at 115200 baud, direct link
+
+━━━ 步骤 2：在 Windows 上把串口桥接到 TCP ━━━━━━━━━━━━━━━━━━━━━━━
+→ 起 serial_tcp_bridge.py COM9 115200
+桥已在后台运行（本脚本退出前一直有效）
+
+━━━ 步骤 3：在 WSL 里起 ppp0 + NAT + MSS 夹取 ━━━━━━━━━━━━━━━━
+[ppp_up] 出口接口 eth0 (MTU 1280)，MSS 夹到 1240
+[ppp_up] PTY 就绪：/tmp/ttyPPP -> 172.18.176.1:5555
+[ppp_up] 转发与 NAT 就绪
+[ppp_up] 链路已建立：
+         5: ppp0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UNKNOWN group default qlen 3
+             inet 10.0.0.1 peer 10.0.0.2/32 scope global ppp0
+                valid_lft forever preferred_lft forever
+[ppp_up] 板子侧地址 10.0.0.2，日志 /tmp/ppp.log
+
+━━━ 步骤 4：从板子控制台验证 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ifconfig
+ppp0	Link encap:TUN at RUNNING mtu 1500
+	inet addr:10.0.0.2 DRaddr:10.0.0.1 Mask:0.0.0.0
+
+nsh> [K
+
+ping 223.5.5.5
+PING 223.5.5.5 56 bytes of data
+56 bytes from 223.5.5.5: icmp_seq=0 time=130.0 ms
+
+→ 之后在板子上跑 ai_agent，用 set_llm 写入 LLM 端点即可对话：
+     nsh> ai_agent
+     vela> set_llm https://<host>/v1 <model> <api_key>
+     vela> ask 你好
+
+━━━ 完成 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+拆链路：wsl.exe -d Ubuntu-24.04 -u root -e bash -lc 'bash /mnt/c/Users/Lawson/Desktop/大三上/openvela AI硬件开发者大赛/源码对照/ppp_down.sh'
+（本脚本退出不会关掉桥；要停它请结束对应的 python 进程）

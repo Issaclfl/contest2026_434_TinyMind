@@ -1,0 +1,165 @@
+nsh> ai_agent
+56 bytes from 223.5.5.5: icmp_seq=9 time=130.0 ms
+10 packets transmitted, 10 received, 0% packet loss, time 10110 ms
+rtt min/avg/max/mdev = 80.000/112.000/170.000/32.186 ms
+nsh> [Kai_agent
+[agent] AI Agent - Vela AI Agent starting (build: Sep 17 2026 23:13:18)
+[agent] [boot +4ms] P0: timezone set
+[agent] [boot +13ms] P0: storage ready
+[agent] [boot +15ms] heap: arena=8743504 free=8308136 used=435368
+[cfgstore] Config store ready at /data/ai_agent/config/config.json
+[agent] [boot +23ms] P1: config_store_init (rc=0)
+[bus] Message bus initialized (depth 16)
+[agent] [boot +25ms] P1: message_bus_init (rc=0)
+[memory] Initializing memory store at /data/ai_agent
+[memory] Created file: /data/ai_agent/config/SOUL.md
+[memory] Created file: /data/ai_agent/config/USER.md
+[memory] Created file: /data/ai_agent/memory/MEMORY.md
+[memory] Created file: /data/ai_agent/config/HEARTBEAT.md
+[memory] Created file: /data/ai_agent/config/cron.json
+[memory] Created directory: /data/ai_agent/memory/daily
+[memory] Memory store initialized successfully
+[agent] [boot +67ms] P1: memory_store_init (rc=0)
+[session] Session manager initialized at /data/ai_agent/sessions
+[agent] [boot +69ms] P1: session_mgr_init (rc=0)
+[proxy] Loading proxy config...
+[proxy] No proxy (direct connection)
+[agent] [boot +77ms] P2: http_proxy_init (rc=0)
+[llm] No API key. Use CLI: set_llm <preset> <key>
+[agent] [boot +89ms] P3: llm_proxy_init (rc=0)
+[llm_router] Router initialized: 0 backends, profile=0
+[agent] [boot +100ms] P3: llm_router_init (rc=0)
+[web_search] No search key. Use: set_tavily_key / set_search_key
+[tools] Registered tool: web_search
+[tools] Registered tool: news_search
+[tools] Registered tool: get_weather
+[tools] Registered tool: get_current_time
+[tools] Registered tool: read_file
+[tools] Registered tool: write_file
+[tools] Registered tool: edit_file
+[tools] Registered tool: list_dir
+[tools] Registered tool: cron_add
+[tools] Registered tool: cron_list
+[tools] Registered tool: cron_remove
+[tools] Registered tool: fetch_url
+[tools] Registered tool: analyze_image
+[tools] Registered tool: run_shell
+[tools] Registered tool: get_battery
+[tools] Registered tool: get_wear_state
+[tools] Registered tool: get_screen_state
+[tools] Registered tool: get_heartrate
+[tools] Registered tool: get_steps
+[tools] Registered tool: vibrate
+[tools] Registered tool: feishu_doc_create
+[tools] Registered tool: feishu_doc_write
+[tools] Registered tool: feishu_doc_read
+[tools] Registered tool: feishu_doc_list
+[tools] Registered tool: feishu_chat_members
+[tools] Registered tool: feishu_send_mention
+[tools] Registered tool: music_search
+[tools] Registered tool: music_play
+[tools] Registered tool: music_pause
+[tools] Registered tool: music_resume
+[tools] Registered tool: music_stop
+[tools] Registered tool: music_seek
+[tools] Registered tool: music_set_volume
+[tools] Registered tool: music_status
+[tools] Registered tool: launch_quickapp
+[tools] Registered tool: exit_quickapp
+[tools] Tools JSON built (36 builtin + 0 providers)
+[tools] Tool registry initialized
+[agent] [boot +216ms] P3: tool_registry_init (rc=0)
+[guard] Tool guard initialized (max_input=32768, rate_window=60s, rate_max=10)
+[agent] [boot +219ms] P3: tool_guard_init (rc=0)
+[skills] Initializing skills system
+[skills] Installed built-in skill: /data/ai_agent/skills/weather.md
+[skills] Installed built-in skill: /data/ai_agent/skills/daily-briefing.md
+[skills] Installed built-in skill: /data/ai_agent/skills/skill-creator.md
+[skills] Installed built-in skill: /data/ai_agent/skills/system-health.md
+[skills] Installed built-in skill: /data/ai_agent/skills/reminder.md
+[skills] Installed built-in skill: /data/ai_agent/skills/note-taker.md
+[skills] Installed built-in skill: /data/ai_agent/skills/translate.md
+[skills] Installed built-in skill: /data/ai_agent/skills/news-digest.md
+[skills] Installed built-in skill: /data/ai_agent/skills/feishu-test.md
+[skills] Installed built-in skill: /data/ai_agent/skills/task-manager.md
+[skills] Skills system ready (10 built-in)
+[agent] [boot +293ms] P3: skill_loader_init (rc=0)
+[agent] Agent loop initialized
+[agent] [boot +295ms] P3: agent_loop_init (rc=0)
+[cron] No cron file, starting fresh
+[agent] [boot +298ms] P3: cron_service_init (rc=0)
+[heartbeat] Heartbeat service initialized (file: /data/ai_agent/HEARTBEAT.md, interval: 1800s)
+[agent] [boot +300ms] P3: heartbeat_init (rc=0)
+[voice] Voice channel initializing
+[voice_tts] Registered backend: volcengine
+[voice_asr] Registered backend: volcengine
+[agent] [boot +312ms] P3: voice_channel_init (rc=0)
+NSH commands registered
+[agent] [boot +314ms] P4: nsh_commands_init (rc=0)
+[agent] [boot +318ms] P5: outbound dispatch thread started
+[cron] Cron started (0 jobs, interval 10s)
+[heartbeat] Heartbeat started (every 30 min)
+[agent] [boot +326ms] P5: cron + heartbeat started
+[agent] [boot +328ms] P5: network_watch thread started (async)
+[agent] [boot +330ms] P6: nsh_commands_start (rc=0)
+[agent] [boot +331ms] AI Agent ready. Type 'help' in NSH for commands.
+[agent] Outbound dispatch started
+[agent] Network watcher started
+[netmgr] No saved WiFi credentials. Use CLI: set_wifi <ssid> <pass>
+[netmgr] Found iface ppp0 addr 10.0.0.2
+[netmgr] Network connected: 10.0.0.2
+[netmgr] Found iface ppp0 addr 10.0.0.2
+[agent] Network connected: 10.0.0.2
+[agent] Agent loop started, free heap: 8186248
+[agent] Buffers: ctx=8192 hist=8192 tool=8192
+[agent] Tool output pool: 2 x 16384 bytes
+[agent] Tools JSON loaded: 9946 bytes
+[ws] WebSocket server started on port 28789
+[agent] All network services started!
+[cli] NSH CLI started. Type 'help' for commands.
+vela> 
+vela> set_llm https://token-plan-cn.xiaomimimo.com/v1 mimo-v2.5-pro tp-<REDACTED>
+[llm_router] Backend 0 configured: token-plan-cn.xiaomimimo.com
+[llm] LLM config updated atomically: token-plan-cn.xiaomimimo.com/v1/chat/completions (model: mimo-v2.5-pro)
+LLM backend: token-plan-cn.xiaomimimo.com:443/v1/chat/completions (model: mimo-v2.5-pro) [router slot 0]
+API key saved.
+vela> 
+
+=== ask ===
+[agent] Processing message from cli:console
+[skills] Skills summary: 814 bytes
+[context] System prompt built: 3289 bytes
+[llm] LLM config updated atomically: token-plan-cn.xiaomimimo.com/v1/chat/completions (model: mimo-v2.5-pro)
+[trace:7c54306d00000000] BEGIN chat=console chan=cli
+[llm] OpenAI API with tools (model: mimo-v2.5-pro, 14905 bytes)
+[vela_tls] Handshake start: Host=token-plan-cn.xiaomimimo.com, UNIX=2085892205
+[agent] Dispatching response → cli:console
+
+[Agent]: 让我查一下...
+vela> [agent] [Agent]: 让我查一下...
+Sent to agent: 你好，用一句话介绍一下你自己
+[agent] ask: 你好，用一句话介绍一下你自己
+vela> [vela_tls] Handshake OK: TLSv1.2 / TLS-ECDHE-RSA-WITH-CHACHA20-POLY1305-SHA256
+[llm] Response: 157 bytes text, 0 tool calls, finish=end_turn
+[agent] LLM resp: text=157, tool_use=0, calls=0
+[trace:7c54306d00000000] iter=0 tool=(none) latency=17406ms llm=ok backend=0
+[trace:7c54306d00000000] END status=ok iters=1 tools=0 llm_ms=17406 elapsed=18s backend=0
+[agent] Dispatching response → cli:console
+
+[Agent]: 你好！我是运行在 Vela 嵌入式设备上的 AI 助手，能帮你搜索信息、查天气、设提醒、控制音乐等，有什么需要尽管说～
+vela> [agent] [Agent]: 你好！我是运行在 Vela 嵌入式设备上的 AI 助手，能帮你搜索信息、查天气、设提醒、控制音乐等，有什么需要尽管说～
+
+
+=== ask 现在几点了？ ===
+[agent] Processing message from cli:console
+[tools] Executing tool: get_current_time
+[tool_time] Fetching current time...
+[tool_time] Time (local clock): 2036-02-06 14:30:33 CST (UTC+8), UNIX epoch: 2085892233
+[agent] NL fast path: get_current_time (fast=1 llm=1)
+[agent] Dispatching response → cli:console
+
+[Agent]: 2036-02-06 14:30:33 CST (UTC+8), UNIX epoch: 2085892233
+vela> [agent] [Agent]: 2036-02-06 14:30:33 CST (UTC+8), UNIX epoch: 2085892233
+Sent to agent: 现在几点了？
+[agent] ask: 现在几点了？
+vela> 

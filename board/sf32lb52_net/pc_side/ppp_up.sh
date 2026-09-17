@@ -27,6 +27,10 @@
 
 set -e
 
+# iptables / sysctl 在 /usr/sbin 与 /sbin 下，而 root 的非登录 shell 默认不带
+# 这两个目录（用 wsl -u root -e bash 跑时尤其明显）。
+export PATH="$PATH:/usr/sbin:/sbin"
+
 # Windows 宿主在 WSL 视角下的地址（NAT 模式下即 eth0 的默认网关）
 HOST="${1:-$(ip route show default | awk '{print $3; exit}')}"
 PORT="${2:-5555}"

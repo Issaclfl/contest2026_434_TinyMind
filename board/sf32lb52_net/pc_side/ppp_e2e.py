@@ -89,6 +89,20 @@ def list_ports_briefly():
     print("        --mode usbttl  找 USB-TTL 那个（不是 1A86:55D3、也不是蓝牙）")
 
 
+def to_wsl_path(path):
+    """把本脚本所在目录换成 WSL 看得懂的路径。
+
+    脚本常被复制到 Windows 工作目录下运行，而 ppp_up.sh 要交给 WSL 执行；
+    WSL 不认 "C:\\..."，得换成 /mnt/c/...。
+    """
+
+    full = os.path.abspath(path)
+    drive, rest = os.path.splitdrive(full)
+    if drive:
+        return "/mnt/" + drive[0].lower() + rest.replace("\\", "/")
+    return full.replace("\\", "/")
+
+
 def wsl(command, timeout=180):
     """在 WSL 里以 root 执行命令并返回输出（pppd 与 iptables 都需要 root）"""
     full = ["wsl.exe", "-d", WSL_DISTRO, "-u", "root", "-e", "bash", "-lc", command]
@@ -163,8 +177,18 @@ def main():
     if args.mode == "usb":
         print("→ 先确认板子认到了这个节点：")
         print(nsh.run("ls /dev").strip()[-500:])
-    print("→ pppd 必须后台跑：它不会返回，前台会把控制台整个占死")
-    print(nsh.run(f"pppd {board_tty} {baud} &").strip()[:400])
+
+    # 已经有一个在跑就别再起第二个：NuttX 的串口允许多次 open，
+    # 两个 pppd 会往同一条线上各发各的帧，谁也谈不成。
+    running = nsh.run("ps")
+    if "pppd" in running:
+        print("→ 板子上已经有 pppd 在跑，跳过启动：")
+        for line in running.splitlines():
+            if "pppd" in line:
+                print("     " + line.strip())
+    else:
+        print("→ pppd 必须后台跑：它不会返回，前台会把控制台整个占死")
+        print(nsh.run(f"pppd {board_tty} {baud} &").strip()[:400])
     nsh.close()
 
     step(2, "在 Windows 上把串口桥接到 TCP")
@@ -181,8 +205,11 @@ def main():
     print("桥已在后台运行（本脚本退出前一直有效）")
 
     step(3, "在 WSL 里起 ppp0 + NAT + MSS 夹取")
-    rc, out = wsl(f"bash {HERE.replace(chr(92), '/')}/ppp_up.sh "
-                  f"127.0.0.1 5555 10.0.0.1 10.0.0.2 {baud}")
+    # 宿主地址留空，交给 ppp_up.sh 自己探测：桥在 Windows 上，而 WSL 里的
+    # 127.0.0.1 是 WSL 自己，填它必然连不上。路径也要引起来——工作目录名里
+    # 常有空格与中文。
+    rc, out = wsl(f'bash "{to_wsl_path(HERE)}/ppp_up.sh" '
+                  f'"" 5555 10.0.0.1 10.0.0.2 {baud}')
     print(out.strip()[-2000:])
     if rc != 0:
         print(f"→ ppp_up.sh 返回 {rc}，链路没起来。上面的日志能看出卡在哪一段。")
@@ -204,7 +231,7 @@ def main():
     print()
     print("━━━ 完成 " + "━" * 46)
     print("拆链路：wsl.exe -d %s -u root -e bash -lc 'bash %s/ppp_down.sh'"
-          % (WSL_DISTRO, HERE.replace("\\", "/")))
+          % (WSL_DISTRO, to_wsl_path(HERE)))
     print("（本脚本退出不会关掉桥；要停它请结束对应的 python 进程）")
     return 0
 
