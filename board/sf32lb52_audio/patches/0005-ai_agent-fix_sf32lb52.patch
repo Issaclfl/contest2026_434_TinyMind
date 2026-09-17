@@ -1,0 +1,24 @@
+diff --git a/src/core/agent_loop.c b/src/core/agent_loop.c
+index 3d9dec3..0890eeb 100644
+--- a/src/core/agent_loop.c
++++ b/src/core/agent_loop.c
+@@ -662,7 +662,7 @@ static char* handle_slash_remind(const agent_msg_t* msg)
+     char* reply = calloc(1, 512);
+     if (reply) {
+         tool_registry_execute("cron_add", input, reply, 512);
+-        snprintf(reply, 512, "好的，%d 秒后提醒你：%s",
++        snprintf(reply, 512, "好的，%d 秒后提醒你：%.440s",
+             secs, remind_msg);
+     }
+     return reply;
+diff --git a/src/tools/skill_loader.c b/src/tools/skill_loader.c
+index ea21931..95c30f3 100644
+--- a/src/tools/skill_loader.c
++++ b/src/tools/skill_loader.c
+@@ -446,5 +446,5 @@ void skill_loader_refresh(void)
+     /* Invalidate tool registry so next get_tools_json rebuilds */
+     tool_registry_invalidate();
+     syslog(LOG_INFO, "[%s] Skills refreshed (hash=%08x)\n",
+-        TAG, s_last_skill_hash);
++        TAG, (unsigned)s_last_skill_hash);
+ }
