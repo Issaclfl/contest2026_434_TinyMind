@@ -49,15 +49,15 @@ GPIO17/18 是 S3 上 UART1 的 IOMUX 原生引脚，不用额外路由；若排�
 Wi-Fi 凭据**不进仓库**：`sdkconfig` 被 `.gitignore` 排除，凭据只留在本机。
 
 ```
+tools\menuconfig.bat     REM SF32LB52 gateway → Wi-Fi SSID / Wi-Fi password
 tools\build.bat          REM 设好 IDF 环境 + 修下面那处 IDF 缺陷 + 编译
-idf.py menuconfig        REM SF32LB52 gateway → Wi-Fi SSID / password
 idf.py -p COMx flash monitor
 ```
 
-`tools\build.bat` 之所以存在而不是"直接 `idf.py build`"，是因为这台机器上
-ESP-IDF 不在 PATH 里，而且 `idf_cmd_init.bat` 只装 DOSKEY 宏（非交互式 shell
-里等于没装）；另外它会把 IDF 自带的 Python 3.11 放到 PATH 最前面——PATH 上
-的系统 Python 3.13 会让 export 脚本去找一个不存在的 `idf5.5_py3.13_env`。
+两个 .bat 存在的理由（都写在 `tools/idf_env.bat` 里）：这台机器上 ESP-IDF 不在
+PATH 里；`idf_cmd_init.bat` 只装 DOSKEY 宏，非交互式 shell 里等于没装；而且 PATH
+上的系统 Python 3.13 会让 export 脚本去找一个不存在的 `idf5.5_py3.13_env`，所以
+IDF 自带的 3.11 要放到最前面。
 
 ## 跑起来
 
@@ -74,6 +74,22 @@ python ..\pc_side\ppp_e2e.py --mode esp32s3
 
 **S3 重启后板子要重跑一次 `pppd`**：实测板子的 `ppp0` 在对端消失后不会自己掉，
 `net_status` 仍报 connected 而包已经不走了。S3 侧的日志里也写了这条提示。
+
+## 台架模式：先只验 PPP，不开 WiFi
+
+`GATEWAY_UPLINK=n` 时跳过 WiFi 与 NAPT，只起 PPP 服务端。用处是把两个未知数分开：
+**「两边的 PPP 实现能不能谈成」** 与 **「NAT 转不转」**。前者才是整条路线唯一真正
+没底的地方——对面是 NuttX 移植的 pppd，不是 Linux 的——而且它不开 WiFi 就能测，
+不必先准备凭据。
+
+```
+tools\menuconfig.bat     REM SF32LB52 gateway → 关掉 "Bring up Wi-Fi and NAT..."
+tools\build.bat
+```
+
+这个模式下板子只能到本设备、出不了公网；要出网得由 PC 侧或别的设备提供路由
+（例如照 `../pc_side/ppp_up.sh` 那样做）。日志里会明确写出这一点，
+免得把"本来就没有上行"误判成"NAPT 坏了"。
 
 ## 为什么要改 IDF 的一行（`tools/fix_idf_ppp_gate.py`）
 
