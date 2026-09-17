@@ -54,10 +54,12 @@ def list_serial_ports():
 
 
 def open_serial(device, baud):
-    """Open the tty without touching the hardware handshake lines.
+    """Open the tty and leave the handshake lines alone.
 
-    DTR and RTS are left alone deliberately: on some boards they are wired to
-    reset or boot-mode pins, and pyserial asserts them on open by default.
+    DTR and RTS are deliberately not driven: on this board RTS is wired into
+    the auto-download reset circuit, so forcing it one way or the other is a
+    good way to hold the chip in reset.  pyserial's own defaults are what the
+    firmware's tooling already uses, so matching them is the safe choice.
     """
 
     port = serial.Serial()
@@ -71,8 +73,6 @@ def open_serial(device, baud):
     port.rtscts = False
     port.dsrdtr = False
     port.xonxoff = False
-    port.dtr = False
-    port.rts = False
     port.open()
     return port
 

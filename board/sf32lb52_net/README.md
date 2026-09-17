@@ -145,12 +145,50 @@ MSS 夹取规则；起 `pppd` 并等 ppp0 出现。拆链路用 `ppp_down.sh`。
 不夹的话板子会按 1500 发，WSL 往 eth0 转发时直接超 MTU。`ppp_up.sh` 在
 `FORWARD` 链两个方向都把 SYN 的 MSS 设成 `出口MTU - 40`。
 
+## 一次跑通（顺序不能乱）
+
+```bash
+# 1) 板子：后台起 pppd，控制台保持可用
+nsh> pppd /dev/ttyS0 460800 &
+
+# 2) Windows：把 USB-TTL 的 COM 口挂到 TCP 上
+python serial_tcp_bridge.py COM7 460800
+
+# 3) WSL：起 ppp0 + NAT + MSS 夹取（宿主地址自动探测）
+wsl.exe -d Ubuntu-24.04 -u root -e bash -lc \
+  'bash <repo>/board/sf32lb52_net/pc_side/ppp_up.sh'
+
+# 4) 板子上验证
+nsh> ifconfig          # ppp0 应拿到 10.0.0.2
+nsh> ping 223.5.5.5
+```
+
+之后在板子上跑 `ai_agent`，用 `set_llm` 写入端点，`net_test` 可以测 HTTPS 连通。
+
+拆链路：`ppp_down.sh`。
+
+## 接线
+
+USB-TTL 转接器三根线接到板子的 UART2：
+
+| USB-TTL | 板子 | 说明 |
+|---|---|---|
+| TX  | **PA20** | USART2_RXD |
+| RX  | **PA27** | USART2_TXD |
+| GND | GND      | 必须接，否则电平参考不同 |
+
+PA20 / PA27 在本板上是 UART2 专用，没有被别的功能复用
+（只有 -ULP / 黄山派把 PA27 用作 TF 卡 detect，本板让出来了）。
+
 ## 板子上怎么用
 
+**必须后台跑。** `pppd` 是个不会返回的阻塞循环，前台跑会把 nsh 的控制台
+整个占死——直到复位为止都无法再输入任何命令：
+
 ```
-nsh> pppd /dev/ttyS0 460800
-pppd: /dev/ttyS0 at 460800 baud, direct link
-...
+nsh> pppd /dev/ttyS0 460800 &
+pppd [8:100]
+nsh> pppd: /dev/ttyS0 at 460800 baud, direct link
 nsh> ifconfig
 ppp0    Link encap:UNSPEC  HWaddr ...
         inet addr:10.0.0.2  Mask:255.255.255.255
@@ -158,13 +196,37 @@ nsh> ping 223.5.5.5
 ```
 
 `/dev/ttyS0` 就是 UART2：控制台占着 UART1，串口驱动注册其余口时会跳过它，
-所以 UART2 落到第一个空闲编号上。
+所以 UART2 落到第一个空闲编号上。注意板子 README 的表格写的是
+`/dev/ttyS1`——那是 nsh 配置（多启用了一路 UART3）下的编号，本工程只启用了
+UART1/UART2，实测就是 `ttyS0`。
+
+### 别前台跑，也别随便动 RTS
+
+SF32LB52 **没有专用复位引脚**：复位是拿 USB-UART 桥的 RTS 去控一个负载开关
+切断 VCC 实现的（见板子 README 与思澈的自动下载设计文档）。于是串口工具的
+RTS 行为直接决定板子是死是活——`screen` / `cu` 会让芯片一直停在复位，
+`minicom` 连接时会复位一次。
+
+实测：pyserial 的默认行为（open() 时拉 RTS）在这块板上**不会**导致复位或
+掉电，`serial_tcp_bridge.py` 因此在 open 后不动 DTR/RTS，与 `nsh.py`
+保持一致——已经验证过桥进程退出、串口关闭之后板子照常运行。
 
 ## 实测记录
 
-| 项目 | 结果 |
-|---|---|
-| `CONFIG_SERIAL_TERMIOS` 生效（`tcsetattr` 改 UART2 速率） | 待上板 |
-| ppp0 建立、板子拿到 10.0.0.2 | 待上板 |
-| 板子 ping 通外网 | 待上板 |
-| `ai_agent` 经该链路访问 LLM 端点 | 待上板 |
+PC 侧每一环都拿真硬件跑过；只差 UART2 那三根线。
+
+| 环节 | 怎么验的 | 结果 |
+|---|---|---|
+| WSL ↔ Windows 宿主 TCP | 两个方向对打 | 通 |
+| Windows 桥：COM ↔ TCP 双向 | 桥接板子控制台，从 WSL 发 `uname -a` | 板子执行并把结果送回 |
+| socat：TCP ↔ PTY | 与桥串起来跑上面那条 | 通 |
+| pppd 协商 + 分配 IP + 数据面 | WSL 内两个 PTY 对接跑两个 pppd | LCP/IPCP 成功，ppp0/ppp1 起来，跨链路 ping 3/3 零丢包 |
+| 板子 `/dev/ttyS0` 可打开 | `pppd /dev/ttyS0 460800` | 通过 |
+| `CONFIG_SERIAL_TERMIOS` 生效 | 同上，看是否打印 `at 460800 baud` | **通过**（这是我补的 Kconfig 缺口，不补就只能跑 1000000） |
+| `pppd` 内置命令 + 直连模式 | `pppd -h` 打印用法 | 通过（补丁在真机生效） |
+| `ai_agent` 启动 | 板子上跑 `ai_agent` | 通过：36 个工具注册、Skills 装载、`set_llm` 写入成功 |
+| `ai_agent` 网络管理器 | 启动日志 | `[netmgr] Timed out waiting for network`——正是缺 IP |
+| **UART2 ↔ USB-TTL ↔ 桥 ↔ pppd** | 需要接线 | 待接线后验证 |
+
+板子上 PSRAM 已经在堆里：`free` 报 Umem 总量 8.7 MB（512 KB SRAM + 8 MB
+PSRAM，`CONFIG_MM_REGIONS=2`），不需要额外动作。
