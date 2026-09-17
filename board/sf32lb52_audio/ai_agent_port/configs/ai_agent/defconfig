@@ -202,6 +202,28 @@ CONFIG_NETUTILS_CJSON=y
 CONFIG_NETDB_DNSCLIENT=y
 CONFIG_NETDEV_LATEINIT=y
 
+# ---- IP bearer: PPP over UART2 -------------------------------------------
+# The board has no NIC of any kind, so its only route to a network is a
+# point-to-point link on the second UART.  NuttX registers UART2 as
+# /dev/ttyS0 (UART1 is the console and is skipped by the serial driver).
+# SF32LB52 pins: PA20 = USART2_RXD, PA27 = USART2_TXD.
+CONFIG_SERIAL_TERMIOS=y
+CONFIG_EXAMPLES_PPPD=y
+CONFIG_NETUTILS_PPPD=y
+CONFIG_NET_TUN=y
+# pppd() carries IP in a TUN packet buffer, and that buffer *is* the link
+# MTU.  The 296-byte default would cut a TLS handshake certificate into
+# twenty segments; 1500 is the MTU PPP normally runs at.
+CONFIG_NET_TUN_PKTSIZE=1500
+# The board's pppd does not take DNS servers from the peer's IPCP options
+# (ppp_conf.h leaves IPCP_GET_PRI_DNS undefined and nothing calls
+# netlib_set_dns), so the resolver has to be given one statically.  Without
+# this the netdb default applies, which is 10.0.0.1 - an address that on
+# this board is the far end of the PPP link, not a resolver.
+CONFIG_NETDB_DNSSERVER_NAMESERVERS=1
+CONFIG_NETDB_DNSSERVER_IPv4=y
+CONFIG_NETDB_DNSSERVER_IPv4ADDR=0xDF050505
+
 # ---- the agent itself, minimal CLI-only config ----
 CONFIG_EXAMPLES_AI_AGENT_VELA=y
 # CONFIG_AI_AGENT_FEISHU is not set

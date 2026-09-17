@@ -1,0 +1,19 @@
+diff --git a/netutils/pppd/ppp_conf.h b/netutils/pppd/ppp_conf.h
+index 7768dff..05703ab 100644
+--- a/netutils/pppd/ppp_conf.h
++++ b/netutils/pppd/ppp_conf.h
+@@ -56,7 +56,13 @@
+ #define xxdebug_printf          ninfo
+ #define debug_printf            ninfo
+ 
+-#define PPP_RX_BUFFER_SIZE      1024 //1024  //GD 2048 for 1280 IPv6 MTU
++/* Holds one whole IP packet, and one whole AHDLC frame while it is being
++ * reassembled.  The frame is the larger of the two: an MTU-sized packet
++ * plus protocol and FCS fields, inflated by the escape bytes that 0x7e and
++ * 0x7d turn into.  1024 leaves a 1500-byte MTU no room at all.
++ */
++
++#define PPP_RX_BUFFER_SIZE      2048
+ 
+ #define AHDLC_TX_OFFLINE        5
+ 
