@@ -11,9 +11,9 @@ WSL 起 ppp0 + NAT → 从板子控制台验证。
                                           |
                             MASQUERADE -> eth0 -> 外网
 
-两条通路
+三条通路
 --------
-这个板子有两个 Type-C 口，任选其一承载 PPP：
+前两条由 PC 做对端，第三条由另一块板子做对端。
 
   路线 1（优先，免接线）
       用第二条 USB-C 线接板子的「USB2.0 FS」口。那是芯片原生 USB，
@@ -24,6 +24,12 @@ WSL 起 ppp0 + NAT → 从板子控制台验证。
       用 USB-TTL 转接器接板子 UART2：TX→PA20、RX→PA27、GND→GND。
       板子侧是 /dev/ttyS0。
         python ppp_e2e.py --mode usbttl --port COM8
+
+  路线 3（ESP32-S3 做对端，不需要 PC）
+      ESP32-S3-DevKitC-1 跑 esp32s3_gateway（见 ../esp32s3_gateway/），
+      它自己当 PPP 服务端 + NAT，把板子接上 Wi-Fi。此时 PC 上的串口桥与
+      ppp_up.sh 都不需要，本脚本只负责把板子的 pppd 拉起来并验证。
+        python ppp_e2e.py --mode esp32s3
 
 前提
 ----
@@ -69,6 +75,16 @@ MODES = {
         "board_tty": "/dev/ttyS0",
         "baud": 460800,
         "hint": "USB-TTL → 板子 UART2（TX→PA20、RX→PA27、GND→GND）",
+        "check_dev": True,
+    },
+    # ESP32-S3 做对端：它自己就是 PPP 服务端 + NAT，PC 侧没有桥、也没有
+    # ppp0 要建，所以 peer 一栏让主流程跳过步骤 2、3。
+    "esp32s3": {
+        "board_tty": "/dev/ttyS0",
+        "baud": 460800,
+        "hint": "ESP32-S3 网关 → 板子 UART2（TX→PA20、RX→PA27、GND→GND）",
+        "peer": "esp32s3",
+        "check_dev": True,
     },
 }
 
@@ -150,7 +166,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=sorted(MODES), default="usb",
                         help="usb = 芯片原生 USB（免接线，先试这个）；"
-                             "usbttl = UART2 + USB-TTL（默认 usb）")
+                             "usbttl = UART2 + USB-TTL；"
+                             "esp32s3 = 由 ESP32-S3 网关做对端，不经过 PC（默认 usb）")
     parser.add_argument("--port", help="承载 PPP 的那个串口，例如 COM6")
     parser.add_argument("--console", default="COM5", help="板子控制台串口（默认 COM5）")
     parser.add_argument("--console-baud", type=int, default=1000000,
@@ -163,6 +180,10 @@ def main():
     args = parser.parse_args()
 
     if args.stop:
+        if args.mode == "esp32s3":
+            print("esp32s3 模式在 PC 侧没有串口桥、也没有 ppp0 需要拆。")
+            print("要重来一次：复位 ESP32-S3，或在板子上重跑 `pppd /dev/ttyS0 460800 &`。")
+            return 0
         rc, out = wsl(f'bash "{to_wsl_path(HERE)}/ppp_down.sh"')
         print(out.strip())
         subprocess.run(
@@ -188,7 +209,7 @@ def main():
     step(1, "在板子上后台起 pppd")
     nsh = Nsh(args.console, args.console_baud)
     print(nsh.run("uname -a").strip()[:200])
-    if args.mode == "usb":
+    if preset.get("check_dev"):
         print("→ 先确认板子认到了这个节点：")
         print(nsh.run("ls /dev").strip()[-500:])
 
@@ -205,38 +226,51 @@ def main():
         print(nsh.run(f"pppd {board_tty} {baud} &").strip()[:400])
     nsh.close()
 
-    step(2, "在 Windows 上把串口桥接到 TCP")
-    bridge = os.path.join(HERE, "serial_tcp_bridge.py")
-    bridge_log = os.path.join(HERE, "bridge.log")
-    print(f"→ 起 {os.path.basename(bridge)} {args.port} {baud}")
+    if preset.get("peer") == "esp32s3":
+        step(2, "PC 侧无需操作：对端就是 ESP32-S3 网关")
+        print("S3 自己当 PPP 服务端 + NAT，地址分配、默认路由、NAPT 都在它那侧完成，")
+        print("所以这边没有串口桥，也没有 WSL 的 ppp0 要起。")
+        print()
+        print("上电确认三件事：")
+        print("  · S3 已烧 esp32s3_gateway 固件且连上了 Wi-Fi（看它的串口日志里 \"uplink ready\"）")
+        print(f"  · 波特率对齐：板子 {baud}  =  S3 的 GATEWAY_UART_BAUD")
+        print("  · 接线：S3 TX → PA20、S3 RX → PA27、GND 对 GND（不要接 VCC）")
+        print()
+        print("→ S3 那边会打出 \"session up: we are 10.0.0.1, board is 10.0.0.2\"，")
+        print("  以及 \"NAPT on\"；如果只有前者没有后者，板子能到 S3 但出不了网。")
+    else:
+        step(2, "在 Windows 上把串口桥接到 TCP")
+        bridge = os.path.join(HERE, "serial_tcp_bridge.py")
+        bridge_log = os.path.join(HERE, "bridge.log")
+        print(f"→ 起 {os.path.basename(bridge)} {args.port} {baud}")
 
-    # 桥必须活得比本脚本久。若把它的 stdout 接成管道，本脚本一退出管道就断，
-    # 桥写日志时报错退出，WSL 侧的 socat 随即失去对端、ppp0 消失——链路会
-    # 看起来"刚建好就断"。所以日志写文件，并让它脱离本进程。
-    log_fh = open(bridge_log, "w")
-    bridge_proc = subprocess.Popen(
-        [sys.executable, "-u", bridge, args.port, str(baud), "--tcp-port", "5555"],
-        stdout=log_fh, stderr=subprocess.STDOUT,
-        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-    time.sleep(3)
-    if bridge_proc.poll() is not None:
-        print("桥启动失败：")
-        with open(bridge_log, encoding="utf-8", errors="replace") as fh:
-            print(fh.read())
-        return 1
-    print(f"桥已常驻（pid {bridge_proc.pid}，日志 {bridge_log}）")
+        # 桥必须活得比本脚本久。若把它的 stdout 接成管道，本脚本一退出管道就断，
+        # 桥写日志时报错退出，WSL 侧的 socat 随即失去对端、ppp0 消失——链路会
+        # 看起来"刚建好就断"。所以日志写文件，并让它脱离本进程。
+        log_fh = open(bridge_log, "w")
+        bridge_proc = subprocess.Popen(
+            [sys.executable, "-u", bridge, args.port, str(baud), "--tcp-port", "5555"],
+            stdout=log_fh, stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        time.sleep(3)
+        if bridge_proc.poll() is not None:
+            print("桥启动失败：")
+            with open(bridge_log, encoding="utf-8", errors="replace") as fh:
+                print(fh.read())
+            return 1
+        print(f"桥已常驻（pid {bridge_proc.pid}，日志 {bridge_log}）")
 
-    step(3, "在 WSL 里起 ppp0 + NAT + MSS 夹取")
-    # 宿主地址留空，交给 ppp_up.sh 自己探测：桥在 Windows 上，而 WSL 里的
-    # 127.0.0.1 是 WSL 自己，填它必然连不上。路径也要引起来——工作目录名里
-    # 常有空格与中文。
-    rc, out = wsl(f'bash "{to_wsl_path(HERE)}/ppp_up.sh" '
-                  f'"" 5555 10.0.0.1 10.0.0.2 {baud}')
-    print(out.strip()[-2000:])
-    if rc != 0:
-        print(f"→ ppp_up.sh 返回 {rc}，链路没起来。上面的日志能看出卡在哪一段。")
-        bridge_proc.terminate()
-        return 1
+        step(3, "在 WSL 里起 ppp0 + NAT + MSS 夹取")
+        # 宿主地址留空，交给 ppp_up.sh 自己探测：桥在 Windows 上，而 WSL 里的
+        # 127.0.0.1 是 WSL 自己，填它必然连不上。路径也要引起来——工作目录名里
+        # 常有空格与中文。
+        rc, out = wsl(f'bash "{to_wsl_path(HERE)}/ppp_up.sh" '
+                      f'"" 5555 10.0.0.1 10.0.0.2 {baud}')
+        print(out.strip()[-2000:])
+        if rc != 0:
+            print(f"→ ppp_up.sh 返回 {rc}，链路没起来。上面的日志能看出卡在哪一段。")
+            bridge_proc.terminate()
+            return 1
 
     step(4, "从板子控制台验证")
     nsh = Nsh(args.console, args.console_baud)

@@ -59,10 +59,20 @@ MSS=$((WAN_MTU - 40))
 say "出口接口 $WAN (MTU $WAN_MTU)，MSS 夹到 $MSS"
 
 # ---------- 1. 清掉上一次的残留 ----------------------------------------------
-pkill -f "pppd $PTY_LINK" 2>/dev/null || true
+# 残留的 pppd 会握着 tty 的锁不放，新起的那个就会一直报
+# "Device ttyPPP is locked by pid N"，链路看起来"刚建好就断"。
+#
+# 按 PID 杀，不用 pkill -f：pkill 匹配整条命令行，而调用本脚本的那个 shell
+# 的参数里往往就含有同样的字符串，会把自己一起杀掉（症状是命令输出莫名断掉）。
+for pid in $(ps -eo pid,cmd | awk -v t="$PTY_LINK" '$2 == "pppd" && $3 == t {print $1}'); do
+  kill -9 "$pid" 2>/dev/null || true
+done
 pkill -f "socat .*$PTY_LINK" 2>/dev/null || true
-sleep 0.5
-rm -f "$PTY_LINK"
+sleep 1
+
+# 进程没了但锁还留着的情况同样会挡住下一个 pppd，一并清掉。
+LOCK="LCK..$(basename "$PTY_LINK")"
+rm -f "$PTY_LINK" "/var/lock/$LOCK" "/run/lock/$LOCK"
 
 # ---------- 2. socat：TCP <-> PTY --------------------------------------------
 # waitslave 让 socat 先不连 TCP，等 pppd 打开从设备后再连，

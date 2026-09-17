@@ -1,0 +1,7 @@
+# ESP-IDF build output.  sdkconfig matters most here: the Wi-Fi SSID and
+# password live in it, and this repository is public.
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock

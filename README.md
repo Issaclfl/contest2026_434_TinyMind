@@ -188,11 +188,14 @@ contest2026_434_TinyMind/
 │   │   ├── packages-CMakeLists.txt
 │   │   └── README.md              # 移植说明（含 packages 树缺陷的来龙去脉）
 │   └── README.md                  # 音频适配详细说明
-├── board/sf32lb52_net/            ⭐ 第 3 层：IP 承载（PPP over UART2）
+├── board/sf32lb52_net/            ⭐ 第 3 层：IP 承载（PPP）
 │   ├── patches/                   # 板侧 3 处改动
-│   ├── pc_side/                   # 串口桥 + socat + pppd + NAT 脚本
+│   ├── pc_side/                   # 路线 1/2：串口桥 + socat + pppd + NAT 脚本
+│   ├── esp32s3_gateway/           # 路线 3：ESP32-S3 自己当对端（软件完成，未上板）
+│   │   ├── main/                  # PPP 服务端 + NAPT + WiFi，板侧零改动
+│   │   └── tools/                 # 构建脚本 + 一处 ESP-IDF 缺陷的一行修法
 │   ├── apply.sh
-│   └── README.md                  # 接线表、跑通顺序、上板踩到的两个陷阱
+│   └── README.md                  # 三条路线的接线表、跑通顺序、上板踩到的陷阱
 ├── .claude/skills/                # 沉淀的 AI 开发 Skill
 │   └── nuttx-audio-lowerhalf-porting/
 ├── logs/                          # AI Coding 日志

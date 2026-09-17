@@ -1,0 +1,78 @@
+menu "SF32LB52 gateway"
+
+    config GATEWAY_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            Deliberately empty here.  Enter the real value through
+            `idf.py menuconfig`: it is stored in sdkconfig, which .gitignore
+            excludes.  This repository is public, so credentials never belong
+            in a committed file.
+
+    config GATEWAY_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config GATEWAY_WIFI_MAX_RETRY
+        int "Wi-Fi reconnect attempts before giving up (0 = retry forever)"
+        default 0
+
+    config GATEWAY_UART_PORT
+        int "UART port carrying the PPP link"
+        range 0 2
+        default 1
+        help
+            UART0 is the console.  UART1 is the default because its IOMUX pins
+            (GPIO17/18) need no extra routing.
+
+    config GATEWAY_UART_TX_GPIO
+        int "UART TX GPIO (ESP32-S3 -> board UART2 RX / PA20)"
+        default 17
+
+    config GATEWAY_UART_RX_GPIO
+        int "UART RX GPIO (board UART2 TX / PA27 -> ESP32-S3)"
+        default 18
+
+    config GATEWAY_UART_BAUD
+        int "UART baud rate"
+        range 9600 3000000
+        default 460800
+        help
+            Must match the rate the board's pppd is told to use, e.g.
+            `pppd /dev/ttyS0 460800`.  The board's UART driver accepts only
+            8 data bits, no parity, one stop bit.
+
+    config GATEWAY_PPP_OUR_IP
+        string "Address the gateway keeps for itself"
+        default "10.0.0.1"
+
+    config GATEWAY_PPP_PEER_IP
+        string "Address assigned to the board"
+        default "10.0.0.2"
+
+    config GATEWAY_PPP_DNS
+        string "DNS server advertised to the peer"
+        default "223.5.5.5"
+        help
+            Advisory only.  The board's pppd ignores IPCP DNS options and uses
+            the server compiled into its own defconfig.
+
+    config GATEWAY_PPP_PASSIVE
+        bool "Wait for the peer to start LCP (ppp_listen) instead of dialling out"
+        default y
+        help
+            The board's pppd is the active side, so the gateway should listen.
+            It is not known for certain whether that pppd is willing to
+            initiate, so if no session appears try turning this off.
+
+    config GATEWAY_NO_SESSION_HINT_SEC
+        int "Seconds without a session before printing a hint"
+        range 5 600
+        default 30
+
+    config GATEWAY_REARM_SEC
+        int "Seconds between attempts to re-arm a dead PPP session"
+        range 5 3600
+        default 20
+
+endmenu

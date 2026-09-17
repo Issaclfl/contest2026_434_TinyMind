@@ -1,0 +1,42 @@
+# Build settings the gateway depends on.  net_ppp.c turns several of these into
+# compile-time errors, because every one of them fails *silently* at runtime.
+#
+# No credentials here -- Wi-Fi SSID and password are entered through
+# `idf.py menuconfig` and land in sdkconfig, which .gitignore excludes.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---- PPP server ------------------------------------------------------------
+CONFIG_LWIP_PPP_SUPPORT=y
+CONFIG_LWIP_PPP_SERVER_SUPPORT=y
+CONFIG_LWIP_PPP_ENABLE_IPV4=y
+
+# The board runs IPv4 only (CONFIG_NET_TUN_PKGSIZE=1500 over a 10.0.0.0/32
+# pair).  Leaving IPv6CP enabled only adds negotiation noise to the logs.
+CONFIG_LWIP_PPP_ENABLE_IPV6=n
+
+# lwip/Kconfig says it outright: "Please disable this if you're using NAPT on
+# PPP interface, since the compressed IP header might not be correctly
+# interpreted in NAT causing the compressed packet to be dropped."
+CONFIG_LWIP_PPP_VJ_HEADER_COMPRESSION=n
+
+# The board's pppd is built without PAP/CHAP (CONFIG_NETUTILS_PPPD_PAP is not
+# set in its defconfig), so the server must not ask for authentication.
+CONFIG_LWIP_PPP_PAP_SUPPORT=n
+CONFIG_LWIP_PPP_CHAP_SUPPORT=n
+
+# Phase events are the only way to see *where* a failed negotiation stopped.
+# They are compiled out unless this is on, with no runtime warning.
+CONFIG_LWIP_PPP_NOTIFY_PHASE_SUPPORT=y
+
+# Left off: the board neither sends nor answers LCP echoes, so enabling this
+# would only let our side tear down a link that is working fine.
+CONFIG_LWIP_ENABLE_LCP_ECHO=n
+
+# ---- NAPT ------------------------------------------------------------------
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+
+# The board only ever makes outbound connections, so there is nothing to
+# forward inwards.
+CONFIG_LWIP_IPV4_NAPT_PORTMAP=n

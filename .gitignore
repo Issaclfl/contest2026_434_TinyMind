@@ -1,0 +1,5 @@
+# Only cache/build artifacts that can never be a deliverable.  The shipped
+# .gitignore.example is deliberately not activated: it would exclude things this
+# repository does commit (see its own note about logs/).
+__pycache__/
+*.pyc
