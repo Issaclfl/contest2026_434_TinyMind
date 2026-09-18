@@ -19,10 +19,12 @@ USB-TTL 上的 PC，现在拨这块 S3。
 | 胶水层确实进了构建 | 已核对 `esp_netif_lwip_ppp.c.obj` 与 `lwip/netif/ppp.c.obj` 存在于构建产物中——没有下面那行修改，它们不会被编译，链接必然失败 |
 | 编译期守卫 | 5 处误配做成了 `#error`，见 `main/net_ppp.c` |
 | **PPP 服务端互通（S3 ↔ PC，真机）** | **已验证**（2026-09-18，见"台架实测"一节）：LCP/IPCP 协商成功、地址分配正确、ping 5/5 零丢包 |
-| **NAPT 转发、与板子的端到端、断线重连** | **未验证**（NAPT 需要 Wi-Fi 上行；板侧联调需要接线） |
+| **本地模型（llama2.c，真机）** | **已验证**：stories260K 在 PSRAM 里跑，21–26 tok/s；OpenAI 兼容端点对着 PPP 链路开放 |
+| **与板子的端到端（板子问、S3 的本地模型答）** | **已验证**（2026-09-18，三根杜邦线，见"与板子联调"一节）：Agent 的 15.5 KB 请求经 PPP 进 S3，模型生成 576 字符回答，12.4 s 返回；S3 重启后板子 6.9 s 自动重拨 |
+| **NAPT 转发（板子经 S3 上公网）** | **未验证**（只差 Wi-Fi 凭据，见 `tools/set_wifi.bat`） |
 
-S3 这一半（PPP 服务端）已经在真机上对 PC 验证过；还没验的是"Wi-Fi 上行 + NAPT
-转发"和"与板子对接"这两段，分别等 Wi-Fi 凭据和三根杜邦线。
+对 PC 的互通、与板子的全链路、本地模型都已在真机验证；唯一没验的是
+"Wi-Fi 上行 + NAPT 转发"——填一次凭据、重烧一遍就能测。
 
 ## 硬件
 
@@ -82,6 +84,52 @@ python ..\pc_side\ppp_e2e.py --mode esp32s3
 
 **S3 重启后板子要重跑一次 `pppd`**：实测板子的 `ppp0` 在对端消失后不会自己掉，
 `net_status` 仍报 connected 而包已经不走了。S3 侧的日志里也写了这条提示。
+
+## 与板子联调（2026-09-18，真机通过）
+
+三根杜邦线（TX GPIO17→PA20、RX GPIO18←PA27、GND↔GND），部署固件的台架
+变体（PPP 走 UART1，日志留在 UART0）：
+
+```
+板子 nsh> pppd /dev/ttyS0 460800 &        # 之前验证过的同一句，零改动
+S3   日志: session 1 up: we are 10.0.0.1, board is 10.0.0.2
+板子 nsh> ping -c 3 10.0.0.1              # 56 bytes from 10.0.0.1, ~50 ms
+```
+
+Agent 那一侧（这就是"协同"的完整形态——对端是另一块自己跑着推理固件的板子）：
+
+```
+vela> set_llm http://10.0.0.1/v1 stories260K local
+vela> ask One day, a little girl
+[llm] Response: 576 bytes text, 0 tool calls, finish=end_turn   (12.4 s)
+[Agent]: One day, a little girl named Lily went to the park with her mommy. ...
+```
+
+S3 同时刻的日志：`request: 15551 B body` → `answered: 576 chars in 10.0 s
+(26.3 tok/s)`。完整日志原文与三个被这次实测逼出来的修复，见
+`../../../docs/ESP32-S3网关台架实测证据.md` 第六节。
+
+**自愈**：S3 重烧固件后**不必**在板上重跑 pppd——板侧 pppd 的 persist
+6.9 秒自动重拨。早先"S3 重启后板上要重跑 pppd"的提示对这版板侧固件不成立。
+
+## 本地模型（GATEWAY_LOCAL_LLM，默认开）
+
+网关固件里同时跑着一个 llama2.c 小模型（stories260K，0.26M 参数），在
+`http://<本机地址>/v1` 提供 OpenAI 兼容端点——`GET /`（状态页）、
+`GET /v1/models`、`POST /v1/chat/completions`。它开在**所有有地址的接口**上：
+WiFi 起来之前是 PPP 链路（10.0.0.1），WiFi 起来之后两个都能访问。
+
+用途是**断网降级**：板子在拿不到 Wi-Fi 上行时，`set_llm http://10.0.0.1/v1`
+仍能得到回答——小、简单，但确实来自另一块板的本地推理。模型与分词器打包在
+`llm` 分区（16 MB flash 布局，`partitions.csv`），由
+`esp32s3_common/tools/fetch_model.py` 从 hf-mirror 取件打包、
+`tools/model.bat COMx` 烧录；推理代码在两个固件共用的
+`esp32s3_common/components/espllm`。纯推理实测 21–26 tok/s（-O2，240 MHz，
+PSRAM octal 80 MHz）。
+
+要对模型有正确的期待：0.26M 参数只会写通顺的英文小故事，不会听指令——它是
+"链路两端都是嵌入式实现"的证明与离线兜底，不是云端模型的替代品。`menuconfig`
+里关掉 `GATEWAY_LOCAL_LLM` 即可拿回 ~1 MB PSRAM、纯做路由。
 
 ## 台架模式：先只验 PPP，不开 WiFi
 

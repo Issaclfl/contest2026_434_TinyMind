@@ -146,3 +146,66 @@ rtt min/avg/max/mdev = 80.678/87.658/92.762/5.108 ms
 - 本页证明的是两端 PPP 实现的互通性——这是整条路线里最贵、最不确定的一环；
   剩下两项（NAPT 转发、板子接线）出问题时，现在可以确定地排除掉它。
 - 台架版与部署版只差上面那 6 行 Kconfig，`main/` 下**一行代码都没动**。
+
+---
+
+## 六、第二阶段：板子接上三根线之后的端到端（2026-09-18）
+
+第一节的对端是 PC；这一节把对端换成板子本身。三根杜邦线（S3 GPIO17→PA20、
+GPIO18←PA27、GND↔GND），S3 仍是台架配置（PPP 走 UART1/GPIO17-18，日志在
+UART0/COM10，无 WiFi——**本地模型不需要 WiFi**）。
+
+### 上电自愈（先记一件没预料到的好事）
+
+S3 重烧固件后**没有**在板子上重跑 pppd：板侧 pppd 的 persist 自动重拨，
+6.9 秒后 S3 报 `session 1 up`。README 里"S3 重启后板上要重跑 pppd"的提示
+对**这版板侧固件**不成立，已过时。
+
+### S3 侧日志（原样，节选）
+
+```
+I (819) gw_ppp: listening on UART1 (TX GPIO17, RX GPIO18) at 460800 baud, passive
+I (949) espllm.model: 1062783 B model copied to PSRAM (8380296 B were free)
+I (979) espllm: model: 5 layers, dim 64, hidden 172, 8 heads (4 kv), vocab 512, seq_len 512
+I (989) espllm.http: openai-compatible endpoint listening on port 80 (GET /, GET /v1/models, POST /v1/chat/completions)
+I (8869) gw_ppp: session 1 up: we are 10.0.0.1, board is 10.0.0.2
+I (8879) gw_ppp: session running
+I (37849) espllm.http: request: 15551 B body, prompt (22 chars): One day, a little girl
+I (47889) espllm.http: answered: 576 chars in 10.0 s (26.3 tok/s)
+```
+
+### 板子侧（Agent 在 vela> 提示符里）
+
+```
+[netmgr] Found iface ppp0 addr 10.0.0.2
+[agent] Network connected: 10.0.0.2
+[agent] All network services started!
+
+vela> set_llm http://10.0.0.1/v1 stories260K local
+LLM backend: 10.0.0.1:80/v1/chat/completions (model: stories260K)
+
+vela> ask One day, a little girl
+[llm] OpenAI API with tools (model: stories260K, 15551 bytes)
+[llm] Response: 576 bytes text, 0 tool calls, finish=end_turn
+[trace] iter=0 tool=(none) latency=12402ms llm=ok backend=0
+[Agent]: One day, a little girl named Lily went to the park with her mommy.
+They saw a lot of blocks in the forest. ...
+```
+
+### 这一节证明什么
+
+- **"板子问、S3 答"全链路**：Agent 的 OpenAI 请求（系统提示+工具表 15.5 KB）
+  经三根线上的 PPP 进入 S3，S3 上的 llama2.c 模型生成 576 字符回答，原路返回
+  并显示在板子上。**全程无 PC 参与（PC 只当两个串口的看客）、无互联网。**
+- 板子的 Agent 把这条串口链路当成自己的网络（`Network connected: 10.0.0.2`）。
+- 链路自愈：S3 重启后板子 6.9 秒自动重拨。
+
+### 这一次实测逼出来的三个修复（都已入库，提交 61950a0）
+
+1. **HTTP 只 recv 一次**：15.5 KB 请求在 MTU 1500 的 PPP 上拆成十几段，一次
+   recv 只拿前几段，JSON 残缺、字符串没有闭合引号 → 连续三个 400。改成循环
+   读满 Content-Length。
+2. **KV 缓存越界隐患**：封装里 steps 可超 seq_len，上游 forward() 用 pos 直接
+   索引 KV 缓存且无边界检查。改成先数 prompt token 再封顶。
+3. **PPP 监控任务时间单位错误**（秒算成百秒，提示 1 秒就喊、重试一秒一次）+
+   对未建立过的监听器重复 re-arm。另把 ESTABLISH 阶段日志改为如实的"协商中"。
