@@ -146,13 +146,37 @@ static char *rewrite_model(const char *body, size_t body_len, size_t *out_len)
     const char *needle = "\"model\":\"";
     const char *p = strstr(body, needle);
     if (p == NULL) {
-        ESP_LOGW(TAG, "request has no model field; sending it as-is");
-        char *copy = heap_caps_malloc(body_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (copy != NULL) {
-            memcpy(copy, body, body_len + 1);
-            *out_len = body_len;
+        /* No model field: an OpenAI-compatible client that leaves it out used to
+         * get a 400 from the cloud ("Unsupported model unknown-model"), which
+         * looked like a cloud failure and silently degraded to the local model --
+         * a question about the world came back as an action JSON.  The cloud
+         * requires the field, so put ours in. */
+        const char *brace = strchr(body, '{');
+        const char *new_model = CONFIG_GATEWAY_CLOUD_MODEL;
+        if (brace == NULL) {
+            ESP_LOGW(TAG, "request has no JSON object; sending it as-is");
+            char *copy = heap_caps_malloc(body_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (copy != NULL) {
+                memcpy(copy, body, body_len + 1);
+                *out_len = body_len;
+            }
+            return copy;
         }
-        return copy;
+        size_t prefix = (size_t)(brace - body) + 1;
+        size_t add = strlen("\"model\":\"") + strlen(new_model) + strlen("\",") ;
+        size_t new_len = body_len + add;
+        char *out = heap_caps_malloc(new_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (out == NULL) {
+            return NULL;
+        }
+        memcpy(out, body, prefix);
+        int n = snprintf(out + prefix, new_len + 1 - prefix, "\"model\":\"%s\",", new_model);
+        memcpy(out + prefix + (size_t)n, body + prefix, body_len - prefix);
+        out[new_len] = '\0';
+        *out_len = new_len;
+        ESP_LOGI(TAG, "request had no model field; added \"%s\" (%u -> %u B body)",
+                 new_model, (unsigned)body_len, (unsigned)new_len);
+        return out;
     }
     p += strlen(needle);
     const char *end = strchr(p, '"');
