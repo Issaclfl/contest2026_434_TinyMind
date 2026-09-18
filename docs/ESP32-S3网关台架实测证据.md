@@ -291,3 +291,96 @@ They saw a lot of blocks in the forest. ...
 回答正常生成并显示。至此**同刻在线的三件事**：板子经 S3 上公网（NAPT）、
 S3 对板子服务本地模型、S3 自己的 WiFi 上行——一台 S3 同时是"路由器"和
 "推理机"，板子侧零固件改动。
+
+## 八、第四阶段：云-端自适应路由（2026-09-18，真云真 key）
+
+### 它是什么
+
+同一个 `http://10.0.0.1/v1` 端点，板子侧零改动；网关按**连通性**逐请求决定谁作答：
+
+| 请求的 model 名 | 上行状态 | 谁回答 |
+|---|---|---|
+| `local` / `stories260K` | 任意 | 本地模型（显式点名） |
+| 其它（如 `auto`） | 在线 | **云端大模型**（model 字段在途中改写，key 只加在 S3 侧） |
+| 其它（如 `auto`） | 断网 / 云端失败 | **本地模型**（自动降级） |
+
+策略刻意选"互联网在不在"而不是"判断题目难不难"——0.26M 的小模型没有判断能力，
+网关却确切知道上行通不通。两条通道都是真模型，没有假装。
+
+### 实测中逮到的一个真 bug（已修，提交 c756cb4）
+
+第一次跑云端腿，每次都"成功"返回答案——但答案全是本地模型的故事体，账本里
+`cloud ok` 一直是 0。原因：改写模型名会让 body 变长（`"auto"` → `"mimo-v2.5-pro"`），
+而发送时沿用了原始长度，JSON 被截掉 9 字节，云端一路 400 Bad Request，
+固件静默降级回本地。**功能看起来能用，云端腿其实从未生效**——这正是"必须真跑
+一遍"的价值。修复后日志给出铁证：
+
+```
+I (17026) gw_cloud: model "auto" -> "mimo-v2.5-pro" (79 -> 88 B body)
+I (17166) esp-x509-crt-bundle: Certificate validated
+I (20536) gw_cloud: cloud answered in 3.5 s
+```
+
+### 三段实测（同一块板、同一个地址、同一个问题）
+
+**① 云端在线**：板子 `ask "What is edge computing?..."` →
+
+```
+[llm] Response: 271 bytes text, 0 tool calls, finish=end_turn
+[trace] iter=0 tool=(none) latency=7461ms llm=ok backend=0
+[Agent]: Edge computing is a distributed computing paradigm that brings data
+processing and storage closer to the sources of data... enables real-time
+processing for IoT devices and applications.
+```
+
+271 字节日志里那句连贯回答，0.26M 的本地模型不可能产出。PC 侧直连的对照
+实测：中文提问 → 云端 3.5–4.7 s 应答（连续三发 5.8/4.7/3.9 s 全过）。
+
+**② 断网降级**：手机关热点 → S3 连报 12 次 `uplink lost (reason 201)`
+（NO_AP_FOUND，即热点本身消失了）→ 此时用板子问**同一个问题**：
+
+```
+W (354526) gw_cloud: no uplink -- the local model answers (offline mode)
+```
+
+板子照样收到回答，但换成本地模型的故事体：
+
+```
+[Agent]: What is edge computing? Daddy is always just a party. One day,
+Kitty's mom bought him a ground home with a toys. ...
+```
+
+——**降级不等于失能**：链路、Agent、问答流程全活着，只是答案质量诚实地差下去。
+账本记 `offline->local: 1`。
+
+**③ 恢复回切**：热点回来 →
+
+```
+I (405506) gw_wifi: uplink ready: 10.138.138.122, gateway 10.138.138.25
+```
+
+板子问一个新问题 → `latency=7542ms`、230 字节、云端连贯回答（"A microcontroller
+is a compact integrated circuit..."），账本回 `cloud ok`。
+
+（另有一条确定性失败注入：请求不带 model 字段 → 云端必 400 → 本地接住，
+账本 `fail->local: 1`。降级的"失败"侧与"断网"侧都验证到了。）
+
+### 这一节证明什么
+
+- **S3 从"网络出口"升级为"智能出口"**：有网时它是云端大模型的中继（板子侧
+  零改动、key 不下发板子），断网时它就是模型本身。板子永远只知道一个地址。
+- **降级是自动的、秒级的**：断网判定走前置检查（不等超时），板子上看不到任何
+  卡顿或报错。
+- **两个真实故障被实测逮住并修复**：body 截断（上面）与 AMPDU 打印饿死 PPP
+  （§七）。这类缺陷编译期全不可见。
+
+### 两个操作层面的坑（值得写下来）
+
+1. **板子会把相同问题缓存**：连问两次同一句话，第二次 `latency=0ms` 直接返回
+   缓存答案，压根不发请求。演示时**每轮换一个新问法**，否则看到的是缓存而不是
+   路由结果。
+2. **PC 上关串口 = 按 S3 的复位键**：这块 S3 的 FT232 把 RTS 接到了 EN（`--reset`
+   就是利用这一点）。任何串口脚本退出/关闭端口，ESP32 就会复位一次——排查时
+   别把它当成"固件崩溃"。相应地，复位后板子的 `ppp0` 可能变"僵尸"（还挂着旧
+   地址但没有会话），修法是板上 `kill` 掉 pppd 再 `pppd /dev/ttyS0 460800 &`，
+   或让 S3 完整复位一次重新协商。
