@@ -49,10 +49,16 @@ esp_err_t llm_bundle_open(const char *part_name, uint8_t subtype, bool prefer_ps
     uint32_t magic = read_u32(header);
     uint32_t model_size = read_u32(header + 4);
     uint32_t tok_size = read_u32(header + 8);
+    uint32_t format = read_u32(header + 12);
     if (magic != LLM_BUNDLE_MAGIC) {
         ESP_LOGE(TAG, "partition \"%s\" holds 0x%08x, not a packed model (magic 0x%08x).",
                  part_name, (unsigned)magic, (unsigned)LLM_BUNDLE_MAGIC);
         ESP_LOGE(TAG, "flash it: tools\\flash_model.bat COMx");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (format > LLM_BUNDLE_FMT_INT4) {
+        ESP_LOGE(TAG, "pack says weight format %u, which this firmware does not know "
+                      "(0 = fp32, 1 = int8, 2 = int4)", (unsigned)format);
         return ESP_ERR_INVALID_STATE;
     }
     size_t need = HEADER_BYTES + model_size + tok_size;
@@ -107,6 +113,7 @@ esp_err_t llm_bundle_open(const char *part_name, uint8_t subtype, bool prefer_ps
     out->model_size = model_size;
     out->tokenizer = base + HEADER_BYTES + model_size;
     out->tokenizer_size = tok_size;
+    out->format = format;
     return ESP_OK;
 }
 

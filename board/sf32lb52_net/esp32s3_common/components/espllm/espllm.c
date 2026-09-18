@@ -58,13 +58,15 @@ esp_err_t espllm_init(const char *partition_name, uint8_t subtype, bool prefer_p
         ESP_LOGE(TAG, "model not usable: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "model %u B, tokenizer %u B (%s)",
+    ESP_LOGI(TAG, "model %u B, tokenizer %u B (%s), weights %s",
              (unsigned)s_bundle.model_size, (unsigned)s_bundle.tokenizer_size,
-             s_bundle.mapped ? "mapped from flash" : "copied to PSRAM");
+             s_bundle.mapped ? "mapped from flash" : "copied to PSRAM",
+             llm_engine_format_name());
 
     log_heap("before engine init");
     int rc = llm_engine_init(s_bundle.model, s_bundle.model_size,
                              s_bundle.tokenizer, s_bundle.tokenizer_size,
+                             (int)s_bundle.format,
                              CONFIG_ESPLM_TEMPERATURE / 100.0f,
                              CONFIG_ESPLM_TOPP / 100.0f,
                              CONFIG_ESPLM_SEED);
@@ -132,4 +134,17 @@ bool espllm_text_truncated(void)
 double espllm_tok_per_sec(void)
 {
     return llm_engine_tok_per_sec();
+}
+
+const char *espllm_weight_format(void)
+{
+    return s_ready ? llm_engine_format_name() : "unknown";
+}
+
+void espllm_set_temperature(float temperature)
+{
+    if (!s_ready) {
+        return;
+    }
+    llm_engine_set_temperature(temperature);
 }

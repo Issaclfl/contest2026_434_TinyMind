@@ -132,6 +132,20 @@ PSRAM octal 80 MHz）。
 "链路两端都是嵌入式实现"的证明与离线兜底，不是云端模型的替代品。`menuconfig`
 里关掉 `GATEWAY_LOCAL_LLM` 即可拿回 ~1 MB PSRAM、纯做路由。
 
+### 量化权重（可选）
+
+`../esp32s3_common/tools/quantize_model.py` 把我们自己写的 int8 / int4 权重打进同
+一种包，只是把打包头第 12~15 字节的格式字节写成 1 或 2（0 = 上游 fp32）。固件按
+这个字节挑内核，flash 流程一点没变：
+
+    python3 tools/quantize_model.py --format q8     # -> assets/llm_q8.bin（3.82× 小）
+    python3 tools/quantize_model.py --format q4     # -> assets/llm_q4.bin（7.21× 小）
+    tools\model.bat COM10 q8                        # 只写 llm 分区，app 不用重烧
+
+`GET /status` 的 `weights:` 一行会显示当前用的是哪个内核。量化怎么做、误差多大、
+在 PC 上怎么验证的（同一份引擎源码编到 PC 上逐位置比对），见
+`docs/ESP32-S3网关台架实测证据.md` §九。
+
 ## 云-端自适应路由（GATEWAY_CLOUD_*，key 为空时退化为纯本地）
 
 `tools/set_cloud.py`（或 `set_cloud.bat`，交互不回显）把云端 API key 写进

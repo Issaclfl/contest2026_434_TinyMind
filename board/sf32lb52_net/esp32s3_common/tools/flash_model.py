@@ -7,6 +7,7 @@
 用法：
     python tools/flash_model.py COM10
     python tools/flash_model.py COM10 --baud 921600
+    python tools/flash_model.py COM10 --image assets/llm_q8.bin   # 量化后的模型
 """
 import argparse
 import os
@@ -66,15 +67,22 @@ def main():
     ap.add_argument("port", help="例如 COM10")
     ap.add_argument("--partitions", default=PART_CSV_DEFAULT,
                     help="分区表 CSV（默认当前目录的 partitions.csv）")
+    ap.add_argument("--image", default=IMAGE,
+                    help="要写进去的包（默认 assets/llm.bin；量化模型传 assets/llm_q8.bin）")
     ap.add_argument("--baud", type=int, default=921600)
     args = ap.parse_args()
 
-    if not os.path.isfile(IMAGE):
-        raise SystemExit(f"missing {IMAGE}\n先跑： python tools/fetch_model.py")
+    image = args.image
+    if not os.path.isabs(image):
+        # 相对路径优先按 esp32s3_common/ 解释（assets/ 在那儿），其次才是当前目录
+        in_root = os.path.join(ROOT, image)
+        image = in_root if os.path.isfile(in_root) else os.path.join(os.getcwd(), image)
+    if not os.path.isfile(image):
+        raise SystemExit(f"missing {image}\n先跑： python tools/fetch_model.py")
 
     offset = partition_offset(args.partitions, PART_NAME)
-    size = os.path.getsize(IMAGE)
-    print(f"{IMAGE}\n  {size:,} B -> {PART_NAME} 分区 @ 0x{offset:06x} ({args.port}, {args.baud} baud)")
+    size = os.path.getsize(image)
+    print(f"{image}\n  {size:,} B -> {PART_NAME} 分区 @ 0x{offset:06x} ({args.port}, {args.baud} baud)")
 
     cmd = [esptool_python(), "-m", "esptool",
            "--chip", "esp32s3", "--port", args.port, "--baud", str(args.baud),

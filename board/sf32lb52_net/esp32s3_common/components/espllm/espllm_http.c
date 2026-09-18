@@ -272,9 +272,11 @@ static esp_err_t h_status(httpd_req_t *req)
         snprintf(body, sizeof(body),
                  "model : " CONFIG_ESPLM_MODEL_ID ", %d layers, dim %d, hidden %d,\n"
                  "        %d heads (%d kv), vocab %d, seq_len %d\n"
+                 "weights: %s\n"
                  "last  : %.1f tok/s, %u chars%s\n",
                  cfg->n_layers, cfg->dim, cfg->hidden_dim,
                  cfg->n_heads, cfg->n_kv_heads, cfg->vocab_size, cfg->seq_len,
+                 espllm_weight_format(),
                  espllm_tok_per_sec(), (unsigned)espllm_text_len(),
                  espllm_text_truncated() ? " (truncated)" : "");
     }
@@ -300,8 +302,9 @@ static esp_err_t h_dashboard(httpd_req_t *req)
     } else {
         snprintf(text, sizeof(text),
                  "model : " CONFIG_ESPLM_MODEL_ID ", %d layers, dim %d\n"
+                 "weights: %s\n"
                  "last  : %.1f tok/s, %u chars%s\n",
-                 cfg->n_layers, cfg->dim,
+                 cfg->n_layers, cfg->dim, espllm_weight_format(),
                  espllm_tok_per_sec(), (unsigned)espllm_text_len(),
                  espllm_text_truncated() ? " (truncated)" : "");
     }
@@ -435,8 +438,22 @@ static esp_err_t h_chat(httpd_req_t *req)
     if (max_tokens > CONFIG_ESPLM_TOKENS_LIMIT) {
         max_tokens = CONFIG_ESPLM_TOKENS_LIMIT;
     }
+    /* An OpenAI client may pin the sampling temperature, and 0 (greedy) is what
+     * makes two weight formats comparable.  A request that says nothing gets the
+     * configured default, so one caller pinning 0 does not change the next
+     * caller's answers. */
+    float temperature = CONFIG_ESPLM_TEMPERATURE / 100.0f;
+    const char *tv = json_value(body, "temperature", true);
+    if (tv != NULL && ((*tv >= '0' && *tv <= '9') || *tv == '.')) {
+        temperature = strtof(tv, NULL);
+        if (temperature < 0.0f) { temperature = 0.0f; }
+        if (temperature > 2.0f) { temperature = 2.0f; }
+    }
+    espllm_set_temperature(temperature);
     ESP_LOGI(TAG, "request: %u B body, prompt (%u chars): %s",
              (unsigned)body_len, (unsigned)strlen(prompt), prompt);
+    ESP_LOGI(TAG, "sampling: temperature %.2f, max_tokens %d",
+             (double)temperature, max_tokens);
     free(body);
 
     int64_t t0 = esp_timer_get_time();

@@ -384,3 +384,109 @@ is a compact integrated circuit..."），账本回 `cloud ok`。
    别把它当成"固件崩溃"。相应地，复位后板子的 `ppp0` 可能变"僵尸"（还挂着旧
    地址但没有会话），修法是板上 `kill` 掉 pppd 再 `pppd /dev/ttyS0 460800 &`，
    或让 S3 完整复位一次重新协商。
+
+## 九、权重量化：自己写的量化器 + 设备侧量化矩阵乘
+
+**状态：PC 主机侧已全部验证；设备侧只差烧录（见 9.6，COM10 掉了 USB 枚举）。**
+
+### 9.1 为什么做——不是"为了好看"，是带宽
+
+台架上 S3 的本地模型（stories260K）实测 21–26 tok/s，这个数字对不上算力：
+0.26M 参数的 float 乘加在 240 MHz 上该有几百 tok/s。对得上的是**带宽**：每生成
+一个 token 要把全部权重读一遍，fp32 就是 1.04 MB/token；43 ms 一个 token
+→ 24 MB/s 的有效带宽，正好是 PSRAM 上按行扫描的实际水平。今天的开机日志印证了
+权重确实在 PSRAM 里（不是 flash 慢的问题，是 PSRAM 带宽的问题）：
+
+    I (6916) espllm.model: 1062783 B model copied to PSRAM (8374152 B were free)
+
+量化在 S3 上的意义因此不是"省空间"（8 MB 的 llm 分区装得下 1 MB 模型），而是
+**每个 token 要读的字节数**：int8 读 1/4，int4 读 1/8。
+
+### 9.2 量化器：逐行对称，刻意不用 group
+
+llama2.c 的 runq.c / llama.cpp 用"分组"量化，组大小必须整除每个被量化的维度。
+stories260K 的 hidden_dim = 172 既不是 32 也不是 64 的倍数，尾巴会被留在量化之外。
+
+我们的做法（`esp32s3_common/tools/quantize_model.py`，纯标准库 Python，不依赖
+numpy）：
+
+    一行 = 一个输出神经元的全部权重，共用一个 fp32 缩放因子
+        int8: s = max|x| / 127,  q ∈ [-127, 127]
+        int4: s = max|x| / 7,    q ∈ [-8, 7]（q+8 塞进半字节，低半字节在前）
+    激活向量整条量化成一个 int8 向量（一个标量缩放因子）
+    点积在 int32 上累加（最坏 127×127×512 = 8.3e6，int32 里绰绰有余），
+    最后乘回 xs * w_s[i]
+
+好处：**没有任何维度整除约束**，缩放因子开销可忽略（每行 64~172 个权重才 4 B）。
+打包头第 12~15 字节原先的 4 个保留字节成了格式字节（0 = 上游 fp32、1 = int8、
+2 = int4），于是量化包和 fp32 包走同一套 flash 流程，固件按这个字节挑内核。
+
+### 9.3 数字
+
+    stories260K: 5 层, dim 64, hidden 172, 8 head (4 kv), vocab 512, seq_len 512
+    待量化参数 259,328 个
+
+    | 包 | 模型字节数 | 相对 fp32 | 逐张量相对 RMS 误差 |
+    | fp32 | 1,056,540 | 1.00× | — |
+    | int8 |   276,220 | **3.82× 小** | 最大 0.00695（w2），最小 0.00505（wk） |
+    | int4 |   146,556 | **7.21× 小** | 最大 0.12597（w2），最小 0.09238（wk） |
+
+### 9.4 验证：把同一份引擎源码编到 PC 上
+
+量化最容易出的错是"能跑、但答案变差"——**精度损失和实现错误长得一模一样**。
+所以先把它们分开：`components/espllm/espllm_engine.c` 不依赖 ESP-IDF，可以原样
+编到 PC 上（`tools/host_check.c`）对着同一份包跑同一段 prompt。
+
+1. **打包器核对**：每个张量第一行的缩放因子 == fp32 该行 `max|x|/127`，逐个对上：
+   tok 0.00693554、wq 0.00241668、wk 0.00170858、wv 0.00121684、wo 0.00072016、
+   w1 0.00228914、w2 0.00221745、w3 0.00179234。
+2. **往返核对**（`--roundtrip`）：把量化包还原成 fp32 包（**权重完全一样**，只是改
+   走已验证过的 fp32 内核），两者逐位置一致率 90%（int8）/ 90%（int4）——说明
+   量化内核是忠实的，不是"实现歪了"。
+3. **误差归因**（同 prompt、贪心、逐位置比对下一个 token；`tools/quant_agreement.py`）：
+
+    | 比较 | 差别只在 | 一致率 |
+    |---|---|---|
+    | fp32 vs q8 还原包 | 权重精度（走 fp32 内核） | 9/10 |
+    | q8 vs q8 还原包 | 内核（权重相同） | 9/10 |
+    | fp32 vs q8 | 两者 | 13/15 |
+    | fp32 vs q4 还原包 | 权重精度 | 6/10 |
+    | q4 vs q4 还原包 | 内核（权重相同） | 9/10 |
+    | fp32 vs q4 | 两者 | 6/10 |
+
+   读法：**int8 的权重误差已经足以让贪心路径在约 1/10 的位置翻转 argmax**，内核
+   自己再贡献同一量级；int4 由权重误差主导（4/10）。两者不是相加关系（翻转点不
+   独立）。文本层面三种格式都还是通顺英文：
+
+    - fp32：`Once upon a time, there was a little robot named Benny. Benny loved to
+      play with his toys and run around. One day, Benny saw a big, red ball.`
+    - int8：`… named Benny. Benny loved to play with his toys and run around. One
+      day, Benny's mommy told him to be careful and not go on an adventure.`
+    - int4：`… named Benny. Benny loved to play in the sunny day. One day, Benny saw
+      a big bird with a small bird.`
+
+4. **一个真实的 bug（值得写下来）**：第一版把层索引乘成了整张量的行数
+   （`l * rows`，而 `rows` 已经包含所有层），后果是**第 0 层完全正常、第 1 层起
+   全是 NaN，贪心退化成一直输出 `<unk>`**。编译期、精度指标都看不见这种错，只有
+   分层打印激活值能抓到。这也是为什么验证顺序是"先核对打包器、再核对内核"。
+
+### 9.5 复现（PC 侧，已跑通）
+
+    cd board/sf32lb52_net/esp32s3_common
+    python3 tools/quantize_model.py --format q8 --report          # -> assets/llm_q8.bin
+    python3 tools/quantize_model.py --format q4 --roundtrip assets/llm_q4_rt.bin
+    gcc -O2 -o ~/qc/host_check tools/host_check.c \
+        components/espllm/espllm_engine.c -Icomponents/espllm/include -lm
+    python3 tools/quant_agreement.py ~/qc/host_check assets/llm.bin assets/llm_q8.bin
+
+### 9.6 设备侧（待烧录）
+
+固件已经带着量化内核编译通过（app 0x102d60 B）。只差把包写进 llm 分区再量一次
+tok/s——app 不用重烧，换格式只写模型分区：
+
+    tools\model.bat COM10 q8      # 或 q4 / 不带参数 = fp32
+    curl http://<S3 的 WiFi 地址>/status     # weights 一行会显示 int8/int4 quantized
+
+**要测的就是一件事：tok/s。** 9.1 的带宽推断如果成立，int8 应该接近 3~4×、int4
+接近 6~8×；如果不成立（比如算力成了新瓶颈），这个数字会直接告诉我们，届时如实
+写进文档。

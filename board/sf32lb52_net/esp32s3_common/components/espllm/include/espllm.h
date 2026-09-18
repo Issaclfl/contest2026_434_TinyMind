@@ -44,6 +44,16 @@ size_t espllm_text_len(void);
 bool espllm_text_truncated(void);
 double espllm_tok_per_sec(void);
 
+/* The weight format the loaded pack turned out to be ("fp32", "int8 quantized",
+ * "int4 quantized").  Useful in a log line or a status page; the value comes
+ * from the pack header, not from a build-time setting. */
+const char *espllm_weight_format(void);
+
+/* Replaces the temperature the model was initialized with.  A client that
+ * wants a reproducible answer sends temperature 0 (greedy); anything applied
+ * here lasts until the next call. */
+void espllm_set_temperature(float temperature);
+
 /* ---- optional hooks: request routing and the status page -------------------
  *
  * The router gets every chat-completions body before local generation starts.

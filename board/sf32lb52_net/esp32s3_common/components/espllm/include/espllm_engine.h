@@ -26,14 +26,32 @@ typedef struct {
     int seq_len;
 } llm_config_t;
 
+/* The weight formats a pack can carry: the value at offset 12 of the pack
+ * header, handed here unchanged (see espllm_blob.h).  Must match the LLM_QFMT_*
+ * the generated engine defines. */
+#define LLM_QFMT_FP32 0
+#define LLM_QFMT_INT8 1
+#define LLM_QFMT_INT4 2
+
 /* Returns 0 on success, negative if the blobs do not look like a checkpoint /
- * tokenizer.  Not thread-safe: serialize callers. */
+ * tokenizer.  `format` selects the weight layout: 0 is the upstream fp32
+ * checkpoint, 1/2 are the row-quantized int8/int4 layouts written by
+ * tools/quantize_model.py.  Not thread-safe: serialize callers. */
 int llm_engine_init(const void *model_blob, size_t model_size,
                     const void *tokenizer_blob, size_t tokenizer_size,
+                    int format,
                     float temperature, float topp, unsigned long long seed);
 
 int llm_engine_ready(void);
 const llm_config_t *llm_engine_config(void);
+
+/* The weight format the engine was built with, and its name for logs. */
+int llm_engine_format(void);
+const char *llm_engine_format_name(void);
+
+/* Sampling knob; 0 means greedy, which is what makes two weight formats
+ * comparable token by token. */
+void llm_engine_set_temperature(float temperature);
 
 /* Generates up to max_new_tokens after the prompt; the decoded text is then in
  * llm_engine_text().  The prompt is not echoed back. */
