@@ -131,8 +131,10 @@ static esp_err_t on_http_event(esp_http_client_event_t *evt)
 
 /* Rewrites "model":"<anything>" to the configured cloud model so the board's
  * name for its route ("auto") never leaks into a cloud that wants a real one.
- * Returns a heap copy of the body, or NULL. */
-static char *rewrite_model(const char *body, size_t body_len)
+ * Returns a heap copy of the body and its length, or NULL.  The length is an
+ * out-parameter because the rewrite changes it: sending the original length
+ * with the rewritten body truncates the JSON and the cloud answers 400. */
+static char *rewrite_model(const char *body, size_t body_len, size_t *out_len)
 {
     char found[MODEL_MAX];
     const char *needle = "\"model\":\"";
@@ -142,6 +144,7 @@ static char *rewrite_model(const char *body, size_t body_len)
         char *copy = heap_caps_malloc(body_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (copy != NULL) {
             memcpy(copy, body, body_len + 1);
+            *out_len = body_len;
         }
         return copy;
     }
@@ -152,6 +155,7 @@ static char *rewrite_model(const char *body, size_t body_len)
         char *copy = heap_caps_malloc(body_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (copy != NULL) {
             memcpy(copy, body, body_len + 1);
+            *out_len = body_len;
         }
         return copy;
     }
@@ -174,15 +178,18 @@ static char *rewrite_model(const char *body, size_t body_len)
     memcpy(out + prefix + strlen(new_model), body + prefix + old_len,
            body_len - prefix - old_len);
     out[new_len] = '\0';
+    *out_len = new_len;
     if (strcmp(found, new_model) != 0) {
-        ESP_LOGI(TAG, "model \"%s\" -> \"%s\"", found, new_model);
+        ESP_LOGI(TAG, "model \"%s\" -> \"%s\" (%u -> %u B body)",
+                 found, new_model, (unsigned)body_len, (unsigned)new_len);
     }
     return out;
 }
 
 static bool cloud_ask(const char *body, size_t body_len, char **response)
 {
-    char *out_body = rewrite_model(body, body_len);
+    size_t out_len = body_len;
+    char *out_body = rewrite_model(body, body_len, &out_len);
     if (out_body == NULL) {
         return false;
     }
@@ -215,7 +222,7 @@ static bool cloud_ask(const char *body, size_t body_len, char **response)
     }
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "Authorization", "Bearer " CONFIG_GATEWAY_CLOUD_API_KEY);
-    esp_http_client_set_post_field(client, out_body, (int)body_len);
+    esp_http_client_set_post_field(client, out_body, (int)out_len);
 
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
@@ -226,7 +233,10 @@ static bool cloud_ask(const char *body, size_t body_len, char **response)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "cloud call failed: %s", esp_err_to_name(err));
     } else if (status != 200) {
-        ESP_LOGW(TAG, "cloud answered HTTP %d", status);
+        /* The cloud's error text is the fastest way to see what it disliked
+         * about the request; it is a diagnostics message, not user content. */
+        ESP_LOGW(TAG, "cloud answered HTTP %d: %.160s", status,
+                 acc.buf != NULL ? acc.buf : "(no body)");
     } else if (acc.overflow || acc.buf == NULL || acc.len == 0) {
         ESP_LOGW(TAG, "cloud answer incomplete (%u bytes%s)",
                  (unsigned)acc.len, acc.overflow ? ", over the cap" : "");
