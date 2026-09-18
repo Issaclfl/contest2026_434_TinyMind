@@ -233,7 +233,7 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
-    #pragma omp parallel for private(i)
+    /* ESP-IDF: no OpenMP -- single core, see tools/port_llama2.py */
     for (i = 0; i < d; i++) {
         float val = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -295,7 +295,7 @@ float* forward(Transformer* transformer, int token, int pos) {
 
         // multihead attention. iterate over all heads
         int h;
-        #pragma omp parallel for private(h)
+        /* ESP-IDF: no OpenMP (see the note in matmul) */
         for (h = 0; h < p->n_heads; h++) {
             // get the query vector for this head
             float* q = s->q + h * head_size;
@@ -882,9 +882,23 @@ int llm_engine_generate(const char *prompt, int max_new_tokens)
     s_text[0] = '\0';
     s_text_truncated = 0;
     s_tok_per_sec = 0.0;
-    /* steps counts positions, prompt included; encode() works on a bounded
-     * buffer upstream, so cap the prompt's share rather than trusting it. */
-    int steps = 512 + max_new_tokens;
+    /* generate() walks pos from 0 and forward() indexes the KV cache with it,
+     * so pos must never reach config.seq_len -- the cache is exactly that long
+     * and upstream has no bounds check.  Counting the prompt's tokens here
+     * keeps max_new_tokens exact *and* the walk in bounds. */
+    int prompt_tokens = 0;
+    int *scratch = (int *)malloc((strlen(prompt) + 3) * sizeof(int));
+    if (scratch == NULL) { return -1; }
+    encode(&s_tokenizer, (char *)prompt, 1, 0, scratch, &prompt_tokens);
+    free(scratch);
+
+    int steps = prompt_tokens + max_new_tokens;
+    if (steps > s_transformer.config.seq_len) { steps = s_transformer.config.seq_len; }
+    if (steps <= prompt_tokens) {
+        fprintf(stderr, "prompt fills the %d-token context; nothing left to generate\n",
+                s_transformer.config.seq_len);
+        return -1;
+    }
     generate(&s_transformer, &s_tokenizer, &s_sampler, (char *)prompt, steps);
     return 0;
 }

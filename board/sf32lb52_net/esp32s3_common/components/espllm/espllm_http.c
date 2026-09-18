@@ -28,7 +28,11 @@
 
 static const char *TAG = "espllm.http";
 
-#define BODY_MAX_BYTES 4096
+/* Request bodies are not small: the board's agent sends its system prompt and
+ * the whole tool catalogue, measured at ~15.5 KB.  The limit is about not
+ * letting an arbitrary client make us allocate without bound, not about
+ * keeping requests tiny. */
+#define BODY_MAX_BYTES 32768
 #define PROMPT_MAX_BYTES 512
 
 /* ---------------------------------------------------------------- JSON in -- */
@@ -60,6 +64,45 @@ static const char *json_value(const char *json, const char *key, bool from_end)
             return found;
         }
         p = q;   /* keep scanning for a later one */
+    }
+    return found;
+}
+
+/* Same search as json_value, but only accepts a value that is a JSON string.
+ *
+ * Needed for "content": the board's agent sends its tool catalogue, and one of
+ * those tools takes a parameter called "content" (write_file).  A plain
+ * last-match search therefore lands on a tool *object* rather than on the
+ * user's message, and the request is rejected for having no usable prompt.
+ * Requiring a quote keeps the real message. */
+static const char *json_string_value(const char *json, const char *key, bool from_end)
+{
+    size_t klen = strlen(key);
+    const char *found = NULL;
+
+    for (const char *p = json; (p = strchr(p, '"')) != NULL; p++) {
+        if (strncmp(p + 1, key, klen) != 0 || p[1 + klen] != '"') {
+            continue;
+        }
+        const char *q = p + 2 + klen;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') {
+            q++;
+        }
+        if (*q != ':') {
+            continue;
+        }
+        q++;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') {
+            q++;
+        }
+        if (*q != '"') {
+            continue;   /* an object, a number, null -- not the user's text */
+        }
+        found = q;
+        if (!from_end) {
+            return found;
+        }
+        p = q;
     }
     return found;
 }
@@ -240,27 +283,68 @@ static esp_err_t h_chat(httpd_req_t *req)
     if (body == NULL) {
         return send_error(req, "500 Internal Server Error", "out of memory");
     }
-    int got = httpd_req_recv(req, body, req->content_len);
-    if (got <= 0) {
-        free(body);
-        return send_error(req, "400 Bad Request", "could not read the body");
+    /* A single recv returns only what has arrived so far -- over the PPP link
+     * the agent's ~15 KB request lands in many 1500-byte segments, so keep
+     * reading until the announced Content-Length is actually in hand.  The
+     * truncated first read is exactly what made every string value end without
+     * its closing quote. */
+    size_t total = 0;
+    while (total < (size_t)req->content_len) {
+        int n = httpd_req_recv(req, body + total, req->content_len - total);
+        if (n <= 0) {
+            free(body);
+            return send_error(req, "400 Bad Request", "could not read the body");
+        }
+        total += (size_t)n;
     }
-    body[got] = '\0';
+    body[total] = '\0';
 
     /* The user's turn is the last message, so search from the end.  "prompt"
-     * is accepted too, for the non-chat completion shape. */
-    const char *value = json_value(body, "content", true);
+     * is accepted too, for the non-chat completion shape.  A client may put
+     * far more in "content" than this model can use, so an over-long prompt is
+     * cut to its tail -- the question is at the end -- rather than rejected. */
+    const char *value = json_string_value(body, "content", true);
     if (value == NULL) {
-        value = json_value(body, "prompt", true);
+        value = json_string_value(body, "prompt", true);
     }
+    size_t body_len = total;
     char prompt[PROMPT_MAX_BYTES];
-    if (value == NULL || !json_string(&value, prompt, sizeof(prompt)) || prompt[0] == '\0') {
+    if (value != NULL) {
+        /* Decode into a buffer the size of the request (decoded text is never
+         * longer than its encoding), then keep the tail when the model's
+         * window cannot hold it all.  Cutting mid-UTF-8 is acceptable here:
+         * the tokenizers are byte-oriented, so a split sequence costs one odd
+         * token instead of the whole question. */
+        char *decoded = malloc(body_len + 1);
+        if (decoded == NULL) {
+            free(body);
+            return send_error(req, "500 Internal Server Error", "out of memory");
+        }
+        prompt[0] = '\0';
+        if (json_string(&value, decoded, body_len + 1)) {
+            size_t n = strlen(decoded);
+            const char *src = decoded;
+            if (n >= sizeof(prompt)) {
+                src = decoded + (n - (sizeof(prompt) - 1));
+                ESP_LOGW(TAG, "prompt is %u chars, keeping the last %u",
+                         (unsigned)n, (unsigned)(sizeof(prompt) - 1));
+            }
+            memcpy(prompt, src, strlen(src) + 1);
+        }
+        free(decoded);
+    } else {
+        prompt[0] = '\0';
+    }
+    if (prompt[0] == '\0') {
         free(body);
         return send_error(req, "400 Bad Request", "no usable content/prompt string");
     }
 
     int max_tokens = CONFIG_ESPLM_HTTP_MAX_TOKENS;
     const char *mt = json_value(body, "max_tokens", true);
+    if (mt == NULL) {
+        mt = json_value(body, "max_completion_tokens", true);   /* the agent's name for it */
+    }
     if (mt != NULL && *mt >= '0' && *mt <= '9') {
         max_tokens = atoi(mt);
     }
@@ -270,7 +354,8 @@ static esp_err_t h_chat(httpd_req_t *req)
     if (max_tokens > CONFIG_ESPLM_TOKENS_LIMIT) {
         max_tokens = CONFIG_ESPLM_TOKENS_LIMIT;
     }
-    ESP_LOGI(TAG, "prompt (%u chars): %s", (unsigned)strlen(prompt), prompt);
+    ESP_LOGI(TAG, "request: %u B body, prompt (%u chars): %s",
+             (unsigned)body_len, (unsigned)strlen(prompt), prompt);
     free(body);
 
     int64_t t0 = esp_timer_get_time();

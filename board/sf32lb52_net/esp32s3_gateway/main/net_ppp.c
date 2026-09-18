@@ -82,6 +82,12 @@ static EventGroupHandle_t s_ppp_events;
 static QueueHandle_t s_uart_queue;
 static unsigned s_sessions;
 
+/* Set once the link has reached the running phase.  Until that has ever
+ * happened the initial ppp_listen() is still valid, so the supervisor must not
+ * re-arm it -- doing so only makes esp_netif log "PPP connection cannot be
+ * started" once per interval while waiting for a peer that has not dialled. */
+static volatile bool s_session_ever_up;
+
 /* --- transport ------------------------------------------------------------ */
 
 static esp_err_t ppp_transmit(void *handle, void *buffer, size_t len)
@@ -142,12 +148,16 @@ static void on_ppp_status(void *arg, esp_event_base_t base, int32_t id, void *da
 
     switch (id) {
     case NETIF_PPP_PHASE_ESTABLISH:
-        ESP_LOGI(TAG, "peer reachable, LCP established");
+        /* lwIP enters this phase when LCP negotiation starts, not when it has
+         * finished: with a listener armed it arrives before any peer exists.
+         * Logging "established" here would be a lie. */
+        ESP_LOGI(TAG, "establishment phase: LCP negotiation in progress");
         break;
     case NETIF_PPP_PHASE_NETWORK:
         ESP_LOGI(TAG, "negotiating IP addresses");
         break;
     case NETIF_PPP_PHASE_RUNNING:
+        s_session_ever_up = true;
         ESP_LOGI(TAG, "session running");
         break;
     case NETIF_PPP_PHASE_TERMINATE:
@@ -304,7 +314,10 @@ static void ppp_supervisor_task(void *arg)
             continue;
         }
 
-        const unsigned idle_s = (unsigned)((since_arm * PPP_SUP_PERIOD_MS) / 1000);
+        /* since_arm counts ticks, so it is portTICK_PERIOD_MS that converts
+         * it to milliseconds -- multiplying by the period again made one
+         * second look like a hundred. */
+        const unsigned idle_s = (unsigned)((since_arm * portTICK_PERIOD_MS) / 1000);
 
         if (!hinted && idle_s >= CONFIG_GATEWAY_NO_SESSION_HINT_SEC) {
             hinted = true;
@@ -316,8 +329,10 @@ static void ppp_supervisor_task(void *arg)
                           "GATEWAY_PPP_PASSIVE=n and rebuild");
         }
 
-        if (idle_s >= CONFIG_GATEWAY_REARM_SEC) {
-            ESP_LOGI(TAG, "re-arming the listener");
+        /* Only after a session has actually ended does lwIP need the listener
+         * re-armed; re-arming a healthy wait just logs an error. */
+        if (s_session_ever_up && idle_s >= CONFIG_GATEWAY_REARM_SEC) {
+            ESP_LOGI(TAG, "previous session ended %u s ago, re-arming the listener", idle_s);
             esp_netif_action_start(s_ppp_netif, NULL, 0, NULL);
             esp_netif_action_connected(s_ppp_netif, NULL, 0, NULL);
             since_arm = 0;
