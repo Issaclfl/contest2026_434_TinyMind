@@ -1,0 +1,47 @@
+menu "Local model node (espllm)"
+
+    config ESPLM_MODEL_ID
+        string "Model name reported over the API"
+        default "stories260K"
+        help
+            Reported by GET /v1/models and echoed in chat completions.  It is
+            what a client's `set_llm <host> <model> <key>` can put in the model
+            field; nothing matches on it.
+
+    config ESPLM_TEMPERATURE
+        int "Temperature x100 (0 = greedy)"
+        range 0 200
+        default 90
+
+    config ESPLM_TOPP
+        int "Top-p x100"
+        range 1 100
+        default 90
+
+    config ESPLM_SEED
+        int "RNG seed"
+        default 1337
+
+    config ESPLM_HTTP_PORT
+        int "HTTP port for the OpenAI-compatible API"
+        default 80
+
+    config ESPLM_HTTP_MAX_TOKENS
+        int "Tokens per request when the client does not ask for a count"
+        range 8 1024
+        default 120
+
+    config ESPLM_TOKENS_LIMIT
+        int "Upper bound on a client's max_tokens"
+        range 8 1024
+        default 256
+        help
+            A cap matters here: on this hardware generation runs at ~20 tok/s,
+            so a client asking for 1000 tokens would hold the HTTP task for
+            almost a minute.
+
+    config ESPLM_HTTP_TASK_STACK
+        int "HTTP task stack size (generation runs on it)"
+        default 32768
+
+endmenu

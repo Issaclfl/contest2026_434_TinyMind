@@ -40,3 +40,34 @@ CONFIG_LWIP_IPV4_NAPT=y
 # The board only ever makes outbound connections, so there is nothing to
 # forward inwards.
 CONFIG_LWIP_IPV4_NAPT_PORTMAP=n
+
+# ---- flash and partitions --------------------------------------------------
+# The module has 16 MB; the default 2 MB would not hold the model partition
+# that the local model needs.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---- PSRAM: where the local model lives ------------------------------------
+# Required by the model, not optional: even stories260K needs 640 KB of KV cache
+# on top of its 1 MB of weights, and internal SRAM is only ~300 KB free.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# ---- compute ---------------------------------------------------------------
+# llama2.c's matmuls are plain C loops: -O2 is most of the speed.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ---- watchdog --------------------------------------------------------------
+# Generation is CPU-bound on purpose and does not yield, so the idle task on
+# that core never runs and the default task watchdog would complain every 5 s.
+# The run is bounded (it finishes and returns), so watching the idle task is the
+# wrong check here; the interrupt watchdog still catches a hung CPU.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n

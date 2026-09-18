@@ -18,6 +18,10 @@
 #include "net_ppp.h"
 #include "net_wifi.h"
 
+#if CONFIG_GATEWAY_LOCAL_LLM
+#include "espllm.h"
+#endif
+
 static const char *TAG = "gw_main";
 
 #define WIFI_WAIT_MS 30000
@@ -67,10 +71,19 @@ void app_main(void)
 #if CONFIG_GATEWAY_UPLINK
     err = net_wifi_start(WIFI_WAIT_MS);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "no Wi-Fi uplink (%s); not starting the PPP server -- "
-                      "the board would reach this device but nothing beyond it",
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "no Wi-Fi uplink (%s)", esp_err_to_name(err));
+#if CONFIG_GATEWAY_LOCAL_LLM
+        /* Worth continuing: the local model does not need Wi-Fi, so the board
+         * can still get an address and talk to it.  It just will not reach
+         * anything beyond this device -- which the log says out loud, so a
+         * missing NAPT is not mistaken for a broken model. */
+        ESP_LOGW(TAG, "continuing without an uplink: the board will reach this device only "
+                      "(the local model is still served)");
+#else
+        ESP_LOGE(TAG, "not starting the PPP server: the board would reach this device and "
+                      "nothing beyond it, and no local model is built in");
         return;
+#endif
     }
 #else
     ESP_LOGW(TAG, "GATEWAY_UPLINK is off: PPP only, no Wi-Fi and no NAPT.");
@@ -83,6 +96,22 @@ void app_main(void)
         ESP_LOGE(TAG, "PPP server did not start: %s", esp_err_to_name(err));
         return;
     }
+
+#if CONFIG_GATEWAY_LOCAL_LLM
+    /* The local model is independent of the uplink: it serves on whatever
+     * interface has an address -- the PPP link for the board, Wi-Fi for
+     * everything else -- and it is the fallback when there is no Wi-Fi at all.
+     * A failure here is logged and stepped over: the board still gets routed. */
+    err = espllm_init(CONFIG_GATEWAY_LLM_PART_NAME, CONFIG_GATEWAY_LLM_PART_SUBTYPE, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "local model unavailable (%s); still routing, but no local answers",
+                 esp_err_to_name(err));
+    } else if (espllm_http_start(CONFIG_ESPLM_HTTP_PORT) != ESP_OK) {
+        ESP_LOGE(TAG, "local model loaded but its HTTP endpoint did not start");
+    }
+#else
+    ESP_LOGI(TAG, "GATEWAY_LOCAL_LLM is off: this device only routes.");
+#endif
 
     ESP_LOGI(TAG, "ready -- waiting for the board to dial in");
 }

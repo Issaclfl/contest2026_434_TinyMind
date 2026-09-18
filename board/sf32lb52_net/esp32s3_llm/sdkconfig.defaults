@@ -1,0 +1,48 @@
+# Fixed configuration for the local model node.
+#
+# No credentials and nothing machine-specific live here; this file is committed.
+#
+# Flash and PSRAM: the module on this DevKit reports 16 MB flash and 8 MB
+# PSRAM.  If a board ever fails to boot with a PSRAM error, the first thing to
+# try is CONFIG_SPIRAM_MODE_QUAD instead of OCT (that is the R2-style module).
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- flash -------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# --- our partition table -----------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- compute -----------------------------------------------------------------
+# The matmuls are plain C loops: -O2 is not a rounding error here, it is most
+# of the speed.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+
+# --- PSRAM -------------------------------------------------------------------
+# Required, not optional: the KV cache of even stories260K is 640 KB, which
+# does not fit the ~300 KB of internal SRAM that is left.  MALLOC lets the
+# engine's calloc/malloc fall back to PSRAM on their own.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# --- logging -----------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# --- watchdog ----------------------------------------------------------------
+# Inference is CPU-bound on purpose: the task runs the whole generation without
+# blocking (that is where the 20 tok/s comes from), so the idle task on that
+# core does not get to run and the default task watchdog complains every 5 s.
+# The run is bounded -- it finishes and returns -- so watching the idle task is
+# the wrong check here.  A hung CPU is still caught by the interrupt watchdog.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n

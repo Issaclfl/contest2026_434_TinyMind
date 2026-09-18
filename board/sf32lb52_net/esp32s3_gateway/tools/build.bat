@@ -12,6 +12,11 @@ REM which the esp_netif PPP layer is left out of the build and linking fails on
 REM undefined references.  See the script header.  Idempotent.
 python "tools\fix_idf_ppp_gate.py" || exit /b 1
 
+REM components/espllm/espllm_engine.c is generated: regenerate it so the
+REM tree always matches the vendored upstream source.  The script asserts
+REM every anchor it rewrites, so an upstream change fails loudly.
+python "..\esp32s3_common\tools\port_llama2.py" || exit /b 1
+
 if not exist sdkconfig (
     echo No sdkconfig yet, selecting the target first.
     call idf.py set-target esp32s3 || exit /b 1

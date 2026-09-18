@@ -5,6 +5,8 @@ idf_component_register(
         "net_ppp.c"
     INCLUDE_DIRS "."
     REQUIRES
+        espllm          # ../esp32s3_common/components/espllm
+        esp_timer
         esp_wifi
         esp_event
         esp_netif

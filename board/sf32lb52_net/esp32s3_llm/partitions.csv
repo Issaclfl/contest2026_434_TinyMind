@@ -1,0 +1,12 @@
+# ESP32-S3-DevKitC-1 with 16 MB flash and 8 MB PSRAM (the module reports
+# N16R8: quad flash, octal PSRAM).
+#
+#   Name,     Type, SubType, Offset,   Size,     Flags
+#
+# The app partition stays modest so that a bigger model later is a change to
+# the "llm" row only -- no rebuild of the app, and the model can be re-flashed
+# on its own.
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x300000,
+llm,        data, 0x40,    0x310000, 0x800000,

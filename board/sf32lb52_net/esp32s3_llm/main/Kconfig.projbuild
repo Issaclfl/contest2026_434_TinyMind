@@ -1,0 +1,17 @@
+menu "Local model demo"
+
+    config LLM_PROMPT
+        string "Prompt used at boot"
+        default "One day, a little girl"
+
+    config LLM_MAX_TOKENS
+        int "Tokens to generate per round"
+        range 8 1024
+        default 160
+
+    config LLM_ROUNDS
+        int "Rounds to run at boot (each one re-generates)"
+        range 1 100
+        default 2
+
+endmenu

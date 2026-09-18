@@ -1,0 +1,12 @@
+# ESP-IDF build output.
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# The fetched/packed model.  Deliberately not committed: it is a third-party
+# artifact with its own provenance, it is 1 MB now and would be megabytes for a
+# bigger one, and a fresh clone can recreate it with
+#     python tools/fetch_model.py
+assets/

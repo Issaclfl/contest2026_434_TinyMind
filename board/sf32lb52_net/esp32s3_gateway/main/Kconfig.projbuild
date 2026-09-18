@@ -87,4 +87,28 @@ menu "SF32LB52 gateway"
         range 5 3600
         default 20
 
+    config GATEWAY_LOCAL_LLM
+        bool "Also run a local llama2.c model and serve it over HTTP"
+        default y
+        help
+            The gateway then answers OpenAI-compatible requests at
+            http://<its address>/v1 -- on the PPP link for the board, and on
+            Wi-Fi for anything else.  It is the offline fallback: the model is
+            small and the answers are simple, but they come from this device
+            with no internet involved.
+
+            Memory: the weights are copied into PSRAM at boot (~1 MB for
+            stories260K, plus ~640 KB of KV cache).  Turn this off to get the
+            PSRAM back and keep the gateway purely a router.
+
+    config GATEWAY_LLM_PART_NAME
+        string "Partition holding the packed model"
+        depends on GATEWAY_LOCAL_LLM
+        default "llm"
+
+    config GATEWAY_LLM_PART_SUBTYPE
+        hex "Subtype of that partition"
+        depends on GATEWAY_LOCAL_LLM
+        default 0x40
+
 endmenu
