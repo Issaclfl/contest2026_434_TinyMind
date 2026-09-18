@@ -31,6 +31,66 @@ static EventGroupHandle_t s_events;
 static esp_netif_t *s_sta_netif;
 static unsigned s_attempt;
 
+/* ---- NO_AP_FOUND diagnostic --------------------------------------------
+ * When the configured SSID is not found, the useful question is "what CAN the
+ * radio see?" -- but console output goes into a public repository, so the
+ * answer must not name the neighbours.  This reports only counts: how many
+ * access points are visible, how many of those are on 2.4 GHz (the only band
+ * this radio has), and whether the configured SSID is among them -- with its
+ * channel and signal strength when it is. */
+static void scan_and_report(void)
+{
+    wifi_scan_config_t scan = { .show_hidden = true };
+    esp_err_t err = esp_wifi_scan_start(&scan, true /* block until done */);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "diagnostic scan failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+    wifi_ap_record_t *records = calloc(count ? count : 1, sizeof(wifi_ap_record_t));
+    if (records == NULL) {
+        ESP_LOGW(TAG, "scan: out of memory for %u records", count);
+        esp_wifi_clear_ap_list();
+        return;
+    }
+    if (esp_wifi_scan_get_ap_records(&count, records) != ESP_OK) {
+        free(records);
+        return;
+    }
+
+    uint16_t on_24 = 0;
+    uint16_t matched_channel = 0;
+    int8_t matched_rssi = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        if (records[i].primary <= 14) {
+            on_24++;
+        }
+        if (matched_channel == 0 &&
+            strcmp((const char *)records[i].ssid, CONFIG_GATEWAY_WIFI_SSID) == 0) {
+            matched_channel = records[i].primary;
+            matched_rssi = records[i].rssi;
+        }
+    }
+    free(records);
+
+    if (matched_channel != 0) {
+        ESP_LOGW(TAG, "scan: \"%s\" IS visible -- channel %u (%s), RSSI %d, %u APs total (%u on 2.4 GHz)",
+                 CONFIG_GATEWAY_WIFI_SSID, matched_channel,
+                 matched_channel <= 14 ? "2.4 GHz" : "5 GHz",
+                 matched_rssi, count, on_24);
+    } else {
+        ESP_LOGW(TAG, "scan: \"%s\" is NOT among %u visible APs (%u of them on 2.4 GHz)",
+                 CONFIG_GATEWAY_WIFI_SSID, count, on_24);
+        if (count > 0 && on_24 == 0) {
+            ESP_LOGW(TAG, "scan: every visible AP is on 5 GHz -- if the target is a phone "
+                          "hotspot, switch it to the 2.4 GHz band (iPhone: Maximize "
+                          "Compatibility; Android: AP band -> 2.4 GHz)");
+        }
+    }
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -43,6 +103,13 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         if (CONFIG_GATEWAY_WIFI_MAX_RETRY == 0 || s_attempt < CONFIG_GATEWAY_WIFI_MAX_RETRY) {
             s_attempt++;
             ESP_LOGW(TAG, "uplink lost (reason %d), attempt %u", ev->reason, s_attempt);
+            if (ev->reason == WIFI_REASON_NO_AP_FOUND && (s_attempt == 1 || s_attempt % 5 == 0)) {
+                /* Must run before the next connect: a scan is refused while the
+                 * station is trying to associate.  Blocking the event loop for
+                 * the ~2 s the scan takes is fine here -- nothing else can
+                 * happen while the uplink is down anyway. */
+                scan_and_report();
+            }
             esp_wifi_connect();
         } else {
             ESP_LOGE(TAG, "uplink lost (reason %d), giving up after %u attempts", ev->reason, s_attempt);

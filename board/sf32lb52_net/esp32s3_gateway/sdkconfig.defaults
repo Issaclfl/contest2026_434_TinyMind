@@ -71,3 +71,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # wrong check here; the interrupt watchdog still catches a hung CPU.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ---- WiFi radio ------------------------------------------------------------
+# The driver ROM-prints a console line for every AMPDU receive BA session
+# (untagged, not level-gated) from its high-priority task; with a phone
+# hotspot this floods the console and starves the PPP UART task -- the board's
+# dialling then fails with "peer asked to close".  PPP over UART carries at
+# most 460800 baud, so AMPDU receive buys nothing here: turn it off.
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n

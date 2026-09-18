@@ -66,10 +66,15 @@ static const char *TAG = "gw_ppp";
 
 #define PPP_RX_TASK_STACK  4096
 #define PPP_RX_TASK_PRIO   10
-/* 2048 rather than the 1024 the client example uses: a full 1500-byte MTU
+/* 8192: at 460800 baud this is ~170 ms of scheduling slack.  The failure it
+ * guards against is real and was measured: the WiFi driver ROM-prints one
+ * line per AMPDU BA session straight to the console from its high-priority
+ * task, which stalls this one long enough to overflow a 2 KB ring and corrupt
+ * PPP frames.  (AMPDU RX is also disabled in sdkconfig.defaults -- that kills
+ * the prints at the source; the slack is defence against the next flood.)
  * frame can arrive faster than the task drains it, and an overrun means a lost
  * AHDLC frame -- PPP cannot ask for a retransmit, it just stalls. */
-#define PPP_RX_BUF_SIZE    2048
+#define PPP_RX_BUF_SIZE    8192
 #define PPP_TX_BUF_SIZE    2048
 #define PPP_UART_QUEUE_LEN 16
 
