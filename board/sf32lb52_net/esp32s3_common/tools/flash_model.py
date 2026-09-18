@@ -87,7 +87,7 @@ def main():
     cmd = [esptool_python(), "-m", "esptool",
            "--chip", "esp32s3", "--port", args.port, "--baud", str(args.baud),
            "--before", "default_reset", "--after", "hard_reset",
-           "write_flash", hex(offset), IMAGE]
+           "write_flash", hex(offset), image]
     print("  " + " ".join(cmd))
     return subprocess.call(cmd)
 

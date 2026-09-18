@@ -58,10 +58,9 @@ esp_err_t espllm_init(const char *partition_name, uint8_t subtype, bool prefer_p
         ESP_LOGE(TAG, "model not usable: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "model %u B, tokenizer %u B (%s), weights %s",
+    ESP_LOGI(TAG, "model %u B, tokenizer %u B (%s)",
              (unsigned)s_bundle.model_size, (unsigned)s_bundle.tokenizer_size,
-             s_bundle.mapped ? "mapped from flash" : "copied to PSRAM",
-             llm_engine_format_name());
+             s_bundle.mapped ? "mapped from flash" : "copied to PSRAM");
 
     log_heap("before engine init");
     int rc = llm_engine_init(s_bundle.model, s_bundle.model_size,
@@ -75,10 +74,13 @@ esp_err_t espllm_init(const char *partition_name, uint8_t subtype, bool prefer_p
         return ESP_FAIL;
     }
 
+    /* The format is only known once the engine has the pack header in hand --
+     * asking for it before init would print the default (fp32) no matter what
+     * the pack says. */
     const llm_config_t *cfg = llm_engine_config();
-    ESP_LOGI(TAG, "model: %d layers, dim %d, hidden %d, %d heads (%d kv), vocab %d, seq_len %d",
+    ESP_LOGI(TAG, "model: %d layers, dim %d, hidden %d, %d heads (%d kv), vocab %d, seq_len %d, weights %s",
              cfg->n_layers, cfg->dim, cfg->hidden_dim, cfg->n_heads, cfg->n_kv_heads,
-             cfg->vocab_size, cfg->seq_len);
+             cfg->vocab_size, cfg->seq_len, llm_engine_format_name());
     ESP_LOGI(TAG, "sampling: temperature %.2f, top-p %.2f, seed %d",
              CONFIG_ESPLM_TEMPERATURE / 100.0f, CONFIG_ESPLM_TOPP / 100.0f, CONFIG_ESPLM_SEED);
     log_heap("after engine init");

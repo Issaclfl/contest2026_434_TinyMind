@@ -146,6 +146,12 @@ PSRAM octal 80 MHz）。
 在 PC 上怎么验证的（同一份引擎源码编到 PC 上逐位置比对），见
 `docs/ESP32-S3网关台架实测证据.md` §九。
 
+S3 上实测（贪心、80 token、模型整份在 PSRAM）：fp32 39.2 tok/s → int8 48.2 tok/s
+→ int4 45.3 tok/s。int8 与 int4 的设备输出与 PC 输出逐字符一致（int4 第 201 字符
+后翻一次）。**量化省的是体积（3.8× / 7.2×），不是时间**：量化后的内核是算力受限
+而不是带宽受限，int4 字节更少反而更慢——要提速得让点积走 SIMD（ESP-DSP/PIE），
+那是下一步的事。
+
 ## 云-端自适应路由（GATEWAY_CLOUD_*，key 为空时退化为纯本地）
 
 `tools/set_cloud.py`（或 `set_cloud.bat`，交互不回显）把云端 API key 写进
