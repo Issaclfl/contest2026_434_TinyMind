@@ -127,6 +127,9 @@ CONFIG_ESP_CONSOLE_NONE=y        # 日志输出关掉，UART0 让给 PPP 数据�
 lwIP 服务端被动应答这条此前唯一没底的互通问题，就此关闭**：
 `GATEWAY_PPP_PASSIVE=y`（默认值）是对的，不需要重烧。
 
+**完整证据**（pppd 协商日志原文、复现命令、满 MTU 与丢包统计）在
+`../../../docs/ESP32-S3网关台架实测证据.md`。
+
 **为什么台架走 UART0**：这块 S3 的 USB 串口是板载 FT232 接 UART0（GPIO43/44），
 即 esptool 能直接烧录的那一路；台架恰好复用它，连第二根线都省了。部署版跑
 UART1（GPIO17/18）对接板子，与此不冲突——只是 Kconfig 值不同。

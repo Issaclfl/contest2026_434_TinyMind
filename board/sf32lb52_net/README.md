@@ -255,8 +255,9 @@ python ppp_e2e.py --mode esp32s3
 
 **状态要说清楚，分两半：S3 这一半已在真机验证——2026-09-18 台架实测，
 S3 的 PPP 服务端对 PC 侧 pppd 客户端 LCP/IPCP 协商成功、地址分配正确、
-ping 5/5 零丢包（见 `esp32s3_gateway/README.md` 的"台架实测"）。还没验的是
-最后一跳"板子 ↔ S3"（等三根杜邦线）和 NAPT 转发（等 Wi-Fi 凭据）。**
+ping 20/20 零丢包、满 MTU（1500 字节整帧、禁分片）通路成立（日志原文见
+`../../docs/ESP32-S3网关台架实测证据.md`）。还没验的是最后一跳"板子 ↔ S3"
+（等三根杜邦线）和 NAPT 转发（等 Wi-Fi 凭据）。**
 
 ## 板子上怎么用
 
@@ -312,7 +313,7 @@ RTS 行为直接决定板子是死是活——`screen` / `cu` 会让芯片一直
 | **路线 1：原生 USB 端到端** | `pppd /dev/ttyACM0 115200 &` + `ppp_e2e.py --mode usb` | **通**：ppp0 起来、板子 `ping 223.5.5.5` 130 ms、Agent 报 `Network connected: 10.0.0.2` |
 | **路线 1 上的真实对话** | `ai_agent` → `set_llm` → `ask` | **通**：`TLSv1.2` 握手成功，157 字节真实回复；工具调用 `get_current_time` 正常 |
 | 路线 2：UART2 + USB-TTL | 物理接线 | 软件链路全环节已验证，未做物理联调（路线 1 已满足需求） |
-| **路线 3：S3 网关 PPP 服务端（真机）** | S3 烧台架固件（`GATEWAY_UPLINK=n`、PPP 走 UART0）→ FT232 桥 → PC 侧 pppd 当客户端 | **通**：LCP/IPCP 协商成功，CCP/IPv6CP/VJ 被按配置拒绝，地址 10.0.0.1/10.0.0.2 分配正确，`ping 10.0.0.1` 5/5 零丢包、平均 23 ms |
+| **路线 3：S3 网关 PPP 服务端（真机）** | S3 烧台架固件（`GATEWAY_UPLINK=n`、PPP 走 UART0）→ FT232 桥 → PC 侧 pppd 当客户端 | **通**：LCP/IPCP 协商成功，CCP/IPv6CP/VJ 被按配置拒绝，地址 10.0.0.1/10.0.0.2 分配正确，`ping` 20/20 零丢包、平均 20 ms，满 MTU（1472+28、禁分片）3/3 通过；日志原文见 `../../docs/ESP32-S3网关台架实测证据.md` |
 | 路线 3：板子 ↔ S3 最后一跳 | 三根杜邦线 + Wi-Fi 凭据 | 待联调 |
 
 ### 路线 1 实测到的两个限制（如实记录）
