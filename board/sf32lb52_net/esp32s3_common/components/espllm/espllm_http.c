@@ -234,11 +234,35 @@ static esp_err_t send_error(httpd_req_t *req, const char *status, const char *ms
     return send_json(req, status, body);
 }
 
+/* ------------------------------------------------------------- the hooks -- */
+
+static espllm_router_fn s_router;
+static espllm_status_fn s_status;
+
+void espllm_set_router(espllm_router_fn router)
+{
+    s_router = router;
+}
+
+void espllm_set_status_provider(espllm_status_fn provider)
+{
+    s_status = provider;
+}
+
+bool espllm_json_field(const char *json, const char *key, char *out, size_t out_size)
+{
+    const char *value = json_string_value(json, key, false);
+    if (value == NULL) {
+        return false;
+    }
+    return json_string(&value, out, out_size);
+}
+
 /* --------------------------------------------------------------- handlers -- */
 
 static esp_err_t h_status(httpd_req_t *req)
 {
-    char body[640];
+    char body[1024];
     const espllm_config_t *cfg = espllm_config();
     if (cfg == NULL) {
         snprintf(body, sizeof(body),
@@ -246,18 +270,62 @@ static esp_err_t h_status(httpd_req_t *req)
                  "state : model not loaded\n");
     } else {
         snprintf(body, sizeof(body),
-                 "espllm -- local model node on ESP32-S3\n\n"
                  "model : " CONFIG_ESPLM_MODEL_ID ", %d layers, dim %d, hidden %d,\n"
                  "        %d heads (%d kv), vocab %d, seq_len %d\n"
-                 "last  : %.1f tok/s, %u chars%s\n"
-                 "api   : GET /v1/models, POST /v1/chat/completions\n",
+                 "last  : %.1f tok/s, %u chars%s\n",
                  cfg->n_layers, cfg->dim, cfg->hidden_dim,
                  cfg->n_heads, cfg->n_kv_heads, cfg->vocab_size, cfg->seq_len,
                  espllm_tok_per_sec(), (unsigned)espllm_text_len(),
                  espllm_text_truncated() ? " (truncated)" : "");
     }
+    if (s_status != NULL) {
+        size_t used = strlen(body);
+        s_status(body + used, sizeof(body) - used);
+    }
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_sendstr(req, body);
+}
+
+/* The dashboard a browser (or a phone on the same Wi-Fi) sees.  A styled <pre>
+ * block, not charts: this is a device with a serial console, and the page is
+ * the same picture the console draws -- refreshed every few seconds so the
+ * routing counters move while someone is watching. */
+static esp_err_t h_dashboard(httpd_req_t *req)
+{
+    char text[1024];
+    char page[2200];
+    const espllm_config_t *cfg = espllm_config();
+    if (cfg == NULL) {
+        snprintf(text, sizeof(text), "state : model not loaded\n");
+    } else {
+        snprintf(text, sizeof(text),
+                 "model : " CONFIG_ESPLM_MODEL_ID ", %d layers, dim %d\n"
+                 "last  : %.1f tok/s, %u chars%s\n",
+                 cfg->n_layers, cfg->dim,
+                 espllm_tok_per_sec(), (unsigned)espllm_text_len(),
+                 espllm_text_truncated() ? " (truncated)" : "");
+    }
+    if (s_status != NULL) {
+        size_t used = strlen(text);
+        s_status(text + used, sizeof(text) - used);
+    }
+
+    snprintf(page, sizeof(page),
+             "<!doctype html><html><head><meta charset=\"utf-8\">"
+             "<meta http-equiv=\"refresh\" content=\"3\">"
+             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+             "<title>TinyMind edge gateway</title><style>"
+             "body{background:#101418;color:#d8e0e8;font-family:monospace;"
+             "display:flex;justify-content:center;margin:0;padding:24px 8px}"
+             "pre{white-space:pre-wrap;font-size:15px;line-height:1.5;max-width:640px}"
+             "h1{font-size:16px;color:#7fd0a0;font-weight:normal;margin:0 0 12px}"
+             "</style></head><body><pre>"
+             "<h1>TinyMind-Audio edge gateway (ESP32-S3)</h1>"
+             "%s"
+             "api   : GET /v1/models, POST /v1/chat/completions</pre></body></html>",
+             text);
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, page);
 }
 
 static esp_err_t h_models(httpd_req_t *req)
@@ -298,6 +366,19 @@ static esp_err_t h_chat(httpd_req_t *req)
         total += (size_t)n;
     }
     body[total] = '\0';
+
+    /* A registered router gets first say: it may answer from somewhere else
+     * (the gateway uses this for its cloud route) and anything else falls
+     * through to the local model below. */
+    if (s_router != NULL) {
+        char *routed = NULL;
+        esp_err_t rerr = s_router(body, total, &routed);
+        if (rerr == ESP_OK && routed != NULL) {
+            esp_err_t sent = send_json(req, "200 OK", routed);
+            free(routed);
+            return sent;
+        }
+    }
 
     /* The user's turn is the last message, so search from the end.  "prompt"
      * is accepted too, for the non-chat completion shape.  A client may put
@@ -425,7 +506,8 @@ esp_err_t espllm_http_start(uint16_t port)
     }
 
     const httpd_uri_t uris[] = {
-        { .uri = "/", .method = HTTP_GET, .handler = h_status },
+        { .uri = "/", .method = HTTP_GET, .handler = h_dashboard },
+        { .uri = "/status", .method = HTTP_GET, .handler = h_status },
         { .uri = "/v1/models", .method = HTTP_GET, .handler = h_models },
         { .uri = "/v1/chat/completions", .method = HTTP_POST, .handler = h_chat },
     };

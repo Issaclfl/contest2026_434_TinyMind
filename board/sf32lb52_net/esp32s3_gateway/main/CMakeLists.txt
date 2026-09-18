@@ -3,6 +3,7 @@ idf_component_register(
         "gateway_main.c"
         "net_wifi.c"
         "net_ppp.c"
+        "net_cloud.c"
     INCLUDE_DIRS "."
     REQUIRES
         espllm          # ../esp32s3_common/components/espllm
@@ -10,6 +11,8 @@ idf_component_register(
         esp_wifi
         esp_event
         esp_netif
+        esp_http_client
+        esp-tls
         lwip
         nvs_flash
         driver

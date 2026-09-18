@@ -209,3 +209,85 @@ They saw a lot of blocks in the forest. ...
    索引 KV 缓存且无边界检查。改成先数 prompt token 再封顶。
 3. **PPP 监控任务时间单位错误**（秒算成百秒，提示 1 秒就喊、重试一秒一次）+
    对未建立过的监听器重复 re-arm。另把 ESTABLISH 阶段日志改为如实的"协商中"。
+
+## 七、第三阶段：板子经 S3 的 WiFi 上公网（NAPT，2026-09-18）
+
+第六节的对端链路里 S3 只当"离线模型"；这一节把 S3 的另一半职责——
+**WiFi 出口 + NAPT**——也验证掉。至此三块板的角色完全定型：
+
+```
+SF32LB52（Agent/音频） --三根杜邦线 PPP--> ESP32-S3（本地模型 + NAPT） --WiFi--> 互联网
+```
+
+### 先记录这次逼出来的失败：AMPDU ROM 打印饿死 PPP
+
+WiFi 关联成功后 PPP 反而掉线（`peer asked to close the session`）。根因不在
+PPP：WiFi 驱动每建立一条 AMPDU BA 会话，就从它的高优先级任务直接往控制台
+打一行 ROM 日志（无标签、不受日志级别控制）。手机热点的 BA 会话建立期这行
+打印连环出现，把 460800 波特率下只有 44 ms 余量的 2 KB UART 接收环挤爆，
+PPP 帧在环里被覆写——UART 没有 PPP 那样的重传，链路就死了。
+
+修复（提交 ac6f6fb）：
+
+1. `CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n`——460800 波特率的 PPP 上 AMPDU
+   接收毫无收益，从源头消灭这批打印；
+2. PPP 接收环 2048 → 8192 B（约 170 ms 余量），防的是下一次别的什么洪泛；
+3. 顺带加了诊断：NO_AP_FOUND 时扫描并只报告 AP 总数 / 2.4 GHz 数 / 配置的
+   SSID 是否可见（信道+信号），从不打印邻居名字。
+
+（第一次连不上热点是另一回事：SSID 是 5 GHz。切 2.4 GHz 后关联成功。）
+
+### 实测（原样，节选）
+
+S3 侧：`uplink ready: 10.138.138.122`（WiFi 关联、拿到地址），随后板子拨入：
+
+```
+I (....) gw_ppp: session 1 up: we are 10.0.0.1, board is 10.0.0.2
+```
+
+板子侧（WiFi 全程在线，S3 同时在服务本地模型端点）：
+
+```
+nsh> ifconfig
+ppp0	Link encap:TUN at RUNNING mtu 1500
+	inet addr:10.0.0.2 DRaddr:10.0.0.1 Mask:0.0.0.0
+
+nsh> ping -c 4 223.5.5.5
+PING 223.5.5.5 56 bytes of data
+56 bytes from 223.5.5.5: icmp_seq=0 time=100.0 ms
+56 bytes from 223.5.5.5: icmp_seq=1 time=70.0 ms
+56 bytes from 223.5.5.5: icmp_seq=2 time=80.0 ms
+56 bytes from 223.5.5.5: icmp_seq=3 time=70.0 ms
+4 packets transmitted, 4 received, 0% packet loss, time 4050 ms
+rtt min/avg/max/mdev = 70.000/80.000/100.000/12.247 ms
+```
+
+### 这一节证明什么
+
+- **NAPT 转发**：板子（10.0.0.2）发出的 ICMP 经 PPP 到 S3，被 NAPT 翻译成
+  WiFi 侧（10.138.138.122）的报文上公网，回程原路返回——4/4、0% 丢包。
+- **S3 双职责同时在线**：上公网的同时，本地模型 HTTP 端点继续在 PPP 侧服务。
+  云端模型与本地模型对板子是同一个地址的两种后端。
+- **PC 彻底出局**：上一节去掉的是"模型依赖 PC"，这一节去掉的是"上网依赖
+  PC"。整套系统（板子 + S3 + 热点）不再需要一台电脑。
+- 修复在真实故障上验证：同一配置在 AMPDU 关闭前 30 秒内必然掉线，关闭后
+  会话稳定、公网往返正常。
+
+### 补记：全栈同刻（WiFi/NAPT 在线 + 本地模型服务）
+
+上表的 ping 之外，又做了一次叠加态验证——WiFi 与 NAPT 保持在线的同时，
+板子 Agent 走 `set_llm http://10.0.0.1/v1 stories260K` 向 S3 本地模型提问：
+
+```
+[netmgr] Found iface ppp0 addr 10.0.0.2
+[agent] Network connected: 10.0.0.2
+vela> set_llm http://10.0.0.1/v1 stories260K local
+LLM backend: 10.0.0.1:80/v1/chat/completions (model: stories260K) [router slot 0]
+vela> ask One day, a little girl
+[Agent]: One day, a little girl named Lily went to the park with her mommy.
+They saw a lot of blocks in the forest. ...
+```
+
+回答正常生成并显示。至此**同刻在线的三件事**：板子经 S3 上公网（NAPT）、
+S3 对板子服务本地模型、S3 自己的 WiFi 上行——一台 S3 同时是"路由器"和
+"推理机"，板子侧零固件改动。

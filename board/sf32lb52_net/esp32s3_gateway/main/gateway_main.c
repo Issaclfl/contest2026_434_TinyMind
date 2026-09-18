@@ -15,6 +15,7 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
+#include "net_cloud.h"
 #include "net_ppp.h"
 #include "net_wifi.h"
 
@@ -108,6 +109,11 @@ void app_main(void)
                  esp_err_to_name(err));
     } else if (espllm_http_start(CONFIG_ESPLM_HTTP_PORT) != ESP_OK) {
         ESP_LOGE(TAG, "local model loaded but its HTTP endpoint did not start");
+    } else {
+        /* One endpoint, two models: the route decides per request whether an
+         * answer comes from the cloud (when the uplink is there) or from this
+         * device.  The board knows neither the cloud nor this decision. */
+        net_cloud_start();
     }
 #else
     ESP_LOGI(TAG, "GATEWAY_LOCAL_LLM is off: this device only routes.");

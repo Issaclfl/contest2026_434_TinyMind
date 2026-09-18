@@ -111,4 +111,43 @@ menu "SF32LB52 gateway"
         depends on GATEWAY_LOCAL_LLM
         default 0x40
 
+    config GATEWAY_CLOUD_URL
+        string "Cloud LLM chat-completions URL"
+        default "https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
+        help
+            Where requests the local model should not answer are proxied to.
+            The default is the endpoint the official agent uses; any
+            OpenAI-compatible one works.  The URL is not a secret; the key is.
+
+    config GATEWAY_CLOUD_MODEL
+        string "Model name sent to the cloud LLM"
+        default "mimo-v2.5-pro"
+        help
+            The board names its route ("auto"); this is the name the cloud
+            gets instead.  The body's model field is rewritten in transit.
+
+    config GATEWAY_CLOUD_API_KEY
+        string "Cloud LLM API key"
+        default ""
+        help
+            Deliberately empty here, like the Wi-Fi credentials: enter the
+            real value through tools/set_cloud.py (no echo) or menuconfig.
+            It is stored in sdkconfig, which .gitignore excludes -- this
+            repository is public and it is never logged or served.
+
+    config GATEWAY_CLOUD_TIMEOUT_MS
+        int "Cloud call timeout (ms)"
+        range 5000 120000
+        default 45000
+        help
+            The board's agent waits 60 s per attempt and retries, so a cloud
+            answer that needs longer than this is useless even if it arrives.
+            When the uplink is gone the connect fails in seconds and the
+            fallback happens long before this expires.
+
+    config GATEWAY_CLOUD_MAX_RESP
+        int "Largest accepted cloud answer (bytes)"
+        range 8192 262144
+        default 65536
+
 endmenu

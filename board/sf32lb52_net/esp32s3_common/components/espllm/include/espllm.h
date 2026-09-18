@@ -44,8 +44,31 @@ size_t espllm_text_len(void);
 bool espllm_text_truncated(void);
 double espllm_tok_per_sec(void);
 
+/* ---- optional hooks: request routing and the status page -------------------
+ *
+ * The router gets every chat-completions body before local generation starts.
+ * It returns ESP_OK with *response pointing at a NUL-terminated JSON document
+ * (heap, freed here) to serve that verbatim as a 200, or any other result to
+ * fall through to the local model.  Unset -- the default -- means every
+ * request is answered locally. */
+typedef esp_err_t (*espllm_router_fn)(const char *body, size_t body_len, char **response);
+
+/* The status provider appends its own lines to GET / (and only there), after
+ * the model's own status.  Returns the number of bytes written.  Unset means
+ * the page shows only the model's own state. */
+typedef int (*espllm_status_fn)(char *out, size_t out_size);
+
+void espllm_set_router(espllm_router_fn router);
+void espllm_set_status_provider(espllm_status_fn provider);
+
+/* Copies the first JSON string value stored under `key` into out (decoded,
+ * NUL-terminated).  False when there is no such key or it holds something
+ * other than a string.  Enough for routing decisions; not a JSON parser. */
+bool espllm_json_field(const char *json, const char *key, char *out, size_t out_size);
+
 /* OpenAI-compatible endpoints on `port`:
- *     GET  /                     status text (browser friendly)
+ *     GET  /                     dashboard (browser friendly, auto-refresh)
+ *     GET  /status               the same information as plain text
  *     GET  /v1/models            the one model this device serves
  *     POST /v1/chat/completions  {"messages":[{"role":"user","content":...}]}
  * Reachable on every interface that has an address, so the board can point its
