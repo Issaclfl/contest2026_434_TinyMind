@@ -7,8 +7,7 @@ REM is a local step rather than something typed into a chat or an issue.
 setlocal
 
 call "%~dp0idf_env.bat" || exit /b 1
-
-cd /d "%~dp0.."
+call "%~dp0proj_dir.bat" || exit /b 1
 echo Configuring %CD%
 echo.
 echo   SF32LB52 gateway -^> Wi-Fi SSID / Wi-Fi password

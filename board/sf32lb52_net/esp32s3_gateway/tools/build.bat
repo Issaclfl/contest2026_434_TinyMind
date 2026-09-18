@@ -1,10 +1,10 @@
 @echo off
-REM Build the ESP32-S3 gateway.  See idf_env.bat for the environment details.
+REM Build the ESP32-S3 gateway.  See idf_env.bat for the environment details and
+REM proj_dir.bat for the UNC-path mirroring.
 setlocal
 
 call "%~dp0idf_env.bat" || exit /b 1
-
-cd /d "%~dp0.."
+call "%~dp0proj_dir.bat" || exit /b 1
 echo Building in %CD%
 
 REM One-line correction to a bad gate in ESP-IDF's own CMakeLists.txt, without
@@ -21,5 +21,6 @@ call idf.py build || exit /b 1
 
 echo.
 echo Built.  Flashing needs the board, and the SSID is set separately:
-echo     idf.py -p COMx flash monitor
+echo     tools\flash.bat COMx
+echo     tools\menuconfig.bat      (Wi-Fi credentials, kept out of the repo)
 endlocal

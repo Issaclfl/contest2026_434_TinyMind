@@ -18,10 +18,11 @@ USB-TTL 上的 PC，现在拨这块 S3。
 | 关键配置 | 已核对生成的 `sdkconfig.h`：`LWIP_PPP_SERVER_SUPPORT=1`、`LWIP_PPP_SUPPORT=1`、`LWIP_IPV4_NAPT=1`、`LWIP_IP_FORWARD=1`、`LWIP_PPP_NOTIFY_PHASE_SUPPORT=1`；VJ 头压缩 / PAP / CHAP / LCP echo 均未启用（正是要的） |
 | 胶水层确实进了构建 | 已核对 `esp_netif_lwip_ppp.c.obj` 与 `lwip/netif/ppp.c.obj` 存在于构建产物中——没有下面那行修改，它们不会被编译，链接必然失败 |
 | 编译期守卫 | 5 处误配做成了 `#error`，见 `main/net_ppp.c` |
-| **上板、与板子的互通、NAPT 转发、断线重连** | **未验证** |
+| **PPP 服务端互通（S3 ↔ PC，真机）** | **已验证**（2026-09-18，见"台架实测"一节）：LCP/IPCP 协商成功、地址分配正确、ping 5/5 零丢包 |
+| **NAPT 转发、与板子的端到端、断线重连** | **未验证**（NAPT 需要 Wi-Fi 上行；板侧联调需要接线） |
 
-下面写的接线与验证步骤是**打算怎么做**，不是**已经验过**。这一条与
-`../README.md` 里路线 1/2 的性质不同，不要混为一谈。
+S3 这一半（PPP 服务端）已经在真机上对 PC 验证过；还没验的是"Wi-Fi 上行 + NAPT
+转发"和"与板子对接"这两段，分别等 Wi-Fi 凭据和三根杜邦线。
 
 ## 硬件
 
@@ -54,6 +55,13 @@ tools\build.bat          REM 设好 IDF 环境 + 修下面那处 IDF 缺陷 + �
 idf.py -p COMx flash monitor
 ```
 
+**一个环境限制要先说**：Windows 的 ESP-IDF 无法在 `\\wsl.localhost\` 共享路径上
+构建本工程——IDF 的 CMake 探测编译器时会起一个 `cmd.exe` 子进程，而 cmd 拒绝以
+UNC 路径为当前目录，链接器随即报 Permission denied。所以构建要在 Windows 本地
+目录里做：把工程拷过去（例如 `C:\Users\<you>\esp32s3_gateway_build`），在副本里
+跑上面三步；WSL 里的仓库始终是源真身。本机用的包装脚本 `gateway_run.bat`
+（set-target / build / menuconfig / flash COMx）在仓库外，随竞赛交付一并归档。
+
 两个 .bat 存在的理由（都写在 `tools/idf_env.bat` 里）：这台机器上 ESP-IDF 不在
 PATH 里；`idf_cmd_init.bat` 只装 DOSKEY 宏，非交互式 shell 里等于没装；而且 PATH
 上的系统 Python 3.13 会让 export 脚本去找一个不存在的 `idf5.5_py3.13_env`，所以
@@ -82,14 +90,46 @@ python ..\pc_side\ppp_e2e.py --mode esp32s3
 没底的地方——对面是 NuttX 移植的 pppd，不是 Linux 的——而且它不开 WiFi 就能测，
 不必先准备凭据。
 
+这个模式下板子只能到本设备、出不了公网；要出网得由 PC 侧或别的设备提供路由。
+日志里会明确写出这一点，免得把"本来就没有上行"误判成"NAPT 坏了"。
+
+## 台架实测（2026-09-18，真机通过）
+
+**接法**：S3 的串口就是一块 FT232（USB 桥接 UART0，见下），PC 侧把 COM10 用
+`serial_tcp_bridge.py COM10 460800` 桥成 TCP，WSL 里照 `../pc_side/ppp_up.sh`
+起 pppd 当客户端。注意地址对调：服务端（S3）占 10.0.0.1，客户端（PC）拿
+10.0.0.2，即 `ppp_up.sh "" 5555 10.0.0.2 10.0.0.1 460800`。
+
+**台架固件与部署固件只差 6 行 sdkconfig**（都在 menuconfig 里能改）：
+
 ```
-tools\menuconfig.bat     REM SF32LB52 gateway → 关掉 "Bring up Wi-Fi and NAT..."
-tools\build.bat
+CONFIG_GATEWAY_UPLINK=n          # 不开 WiFi/NAPT
+CONFIG_GATEWAY_UART_PORT=0       # PPP 走 UART0（FT232 那路）
+CONFIG_GATEWAY_UART_TX_GPIO=43
+CONFIG_GATEWAY_UART_RX_GPIO=44
+CONFIG_ESP_CONSOLE_NONE=y        # 日志输出关掉，UART0 让给 PPP 数据流
+                                 # （部署版是 UART_DEFAULT，日志走 UART0）
 ```
 
-这个模式下板子只能到本设备、出不了公网；要出网得由 PC 侧或别的设备提供路由
-（例如照 `../pc_side/ppp_up.sh` 那样做）。日志里会明确写出这一点，
-免得把"本来就没有上行"误判成"NAPT 坏了"。
+**结果**：
+
+| 项 | 结果 |
+|---|---|
+| LCP | 协商成功，双向 Echo-Req/Rep 正常 |
+| pppd 提出 CCP（压缩） | S3 `Protocol-Rej` → pppd 干净丢弃（对应 `VJ/压缩` 各开关全关） |
+| pppd 提出 IPv6CP | S3 `Protocol-Rej`（对应 `LWIP_PPP_ENABLE_IPV6=n`） |
+| pppd IPCP 提出 VJ 头压缩 | S3 `ConfRej`（对应 `LWIP_PPP_VJ_HEADER_COMPRESSION=n`，NAPT 的硬性要求） |
+| 地址分配 | S3 报自身 10.0.0.1、把 10.0.0.2 分给 PC——两个服务端地址参数都生效 |
+| 数据面 | `ping 10.0.0.1`：5 发 5 中，0% 丢包，平均 23 ms |
+
+值得记下的一点：三个"拒绝"恰好逐条对应 `sdkconfig.defaults` 里三个 `=n`——
+配置是否真的生效，在对端的协商日志里看得清清楚楚。**NuttX pppd 主动发起、
+lwIP 服务端被动应答这条此前唯一没底的互通问题，就此关闭**：
+`GATEWAY_PPP_PASSIVE=y`（默认值）是对的，不需要重烧。
+
+**为什么台架走 UART0**：这块 S3 的 USB 串口是板载 FT232 接 UART0（GPIO43/44），
+即 esptool 能直接烧录的那一路；台架恰好复用它，连第二根线都省了。部署版跑
+UART1（GPIO17/18）对接板子，与此不冲突——只是 Kconfig 值不同。
 
 ## 为什么要改 IDF 的一行（`tools/fix_idf_ppp_gate.py`）
 
@@ -156,7 +196,8 @@ if(CONFIG_PPP_SUPPORT)  →  if(CONFIG_LWIP_PPP_SUPPORT)
 
 | 未知数 | 现在的处理 |
 |---|---|
-| NuttX 的 pppd 是否愿意被拨 | 默认 S3 被动监听（`ppp_passive=true`）。若 30 秒无会话，日志会提示把 `GATEWAY_PPP_PASSIVE` 改成 n 重烧 |
+| ~~NuttX 的 pppd 是否愿意被拨~~ | **已解决**（台架实测）：主动发起、接受协商，`GATEWAY_PPP_PASSIVE=y` 默认值正确 |
+| NAPT 是否正确转发（Wi-Fi 上行 → PPP） | 台架模式不含此段；填好 Wi-Fi 凭据烧部署版后验证 |
 | DevKitC-1 排针是否引出 GPIO17/18 | 引脚是 Kconfig 项，可换任意空闲脚 |
 | 板子排针上 PA20/PA27 是否可用 | 物理前提，需要接线时确认 |
 | 板侧 ppp0 是"僵尸"（对端消失后不掉） | 不修，写进日志提示与本文档：S3 重启后板上重跑 pppd |
@@ -166,7 +207,8 @@ if(CONFIG_PPP_SUPPORT)  →  if(CONFIG_LWIP_PPP_SUPPORT)
 两者对板子完全等价，选哪条只看"要不要 PC 在旁边"：
 
 - `pc_side/` 是 PC 当对端，**已在真机端到端验证**（`../README.md` 路线 1/2）
-- 这里是 S3 当对端，**软件完成、未上板**
+- 这里是 S3 当对端，**S3 侧的 PPP 服务端已在真机验证**（台架实测，对 PC）；
+  剩下"板子 ↔ S3"最后一跳，等三根杜邦线和 Wi-Fi 凭据
 
 `../pc_side/ppp_e2e.py --mode esp32s3` 会跳过 PC 侧的串口桥与 `ppp_up.sh`，
 只负责把板子的 pppd 拉起来并从控制台验证。
