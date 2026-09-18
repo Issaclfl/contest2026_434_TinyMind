@@ -36,6 +36,11 @@ python "tools\set_cloud.py" %ARG% || exit /b 1
 REM --show / --clear are not asking for a build.
 if not "%ARG%"=="" goto :done
 
+REM Re-read the file, so the confirmation is about what is on disk rather than
+REM about what the write was supposed to have done.
+echo.
+python "tools\set_cloud.py" --show
+
 echo.
 echo Rebuilding with the new key...
 call idf.py build || exit /b 1
