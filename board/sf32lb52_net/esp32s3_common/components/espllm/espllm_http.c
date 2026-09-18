@@ -258,6 +258,15 @@ bool espllm_json_field(const char *json, const char *key, char *out, size_t out_
     return json_string(&value, out, out_size);
 }
 
+bool espllm_json_field_last(const char *json, const char *key, char *out, size_t out_size)
+{
+    const char *value = json_string_value(json, key, true);
+    if (value == NULL) {
+        return false;
+    }
+    return json_string(&value, out, out_size);
+}
+
 /* --------------------------------------------------------------- handlers -- */
 
 static esp_err_t h_status(httpd_req_t *req)

@@ -180,6 +180,39 @@ gitignore 的 `sdkconfig` 后，同一个 `http://10.0.0.1/v1` 端点就变成�
   （第二次 `latency=0ms` 直接返回旧答案，压根不发请求），问重了看到的是缓存
   而不是路由结果。实测记录见 `../../docs/ESP32-S3网关台架实测证据.md` §八。
 
+**模型名是活的，按服务端调整**：默认 `mimo-v2.5-pro`（官方 Agent 同款），但
+2026-09-19 台架实测时该服务端对 `-pro` 一律返回 HTTP 500（从 PC 直连也一样，
+与请求大小无关），而 `/v1/models` 列出的 `mimo-v2.5` 正常作答。改法是
+`tools\set_cloud.bat` 里填模型名（或直接改 `CONFIG_GATEWAY_CLOUD_MODEL`）后重编：
+`mimo-v2.5` 一句话回答约 10 秒，`thinking` 也在里面。**云端返回 5xx 时固件按设计
+降级到本地模型**，所以这种情况在板上表现为"回答变成了小故事"，`/status` 的
+`route` 行会写着 `fail->local`——排查顺序就是先看那一行，再从 PC 上用
+`源码对照/cloud_probe.py` 直连一次，区分"我们的问题"和"服务端的问题"。
+
+## 命令模型：让板子上的小模型真的控制硬件（第三条路由）
+
+请求里写 `"model":"cmd"`（板子上就是 `set_llm http://10.0.0.1/v1 cmd local`）时，
+网关用的仍然是本地模型，但**把它当命令翻译器用**：英文口令进，固定 JSON 动作出，
+再由 `main/cmd_exec.c` 真的做掉——
+
+    {"action":"led","color":"red|green|blue|white|yellow|off"}
+    {"action":"wifi_scan"}
+    {"action":"ping","target":"gateway|internet|board"}
+    {"action":"status"}
+
+模型不是拿现成的：`../esp32s3_common/tools/` 里从数据、微调到量化三段齐活
+（`make_cmd_dataset.py` → `train_cmd_model.py` → `quantize_model.py`），留出集
+43/46 完全正确，压成 int8 之后还是 43/46。换模型：
+
+    python3 tools/train_cmd_model.py                    # -> assets/cmd_llm.bin（torch CPU，约 5 分钟）
+    python3 tools/quantize_model.py --input assets/cmd_llm.bin \
+        --format q8 --output assets/llm_cmdq8.bin
+    tools\model.bat COM10 cmdq8                         # 只写 llm 分区
+
+要点：动作里的 IP/端口写死在代码里（`kTargets`），**模型碰不到网络参数**；
+板载 RGB 灯的 GPIO 在 menuconfig（`GATEWAY_LED_GPIO`，rev1.1 是 48）。实测数字、
+原样日志和三条诚实的限制见 `docs/ESP32-S3网关台架实测证据.md` §十。
+
 ## 台架模式：先只验 PPP，不开 WiFi
 
 `GATEWAY_UPLINK=n` 时跳过 WiFi 与 NAPT，只起 PPP 服务端。用处是把两个未知数分开：

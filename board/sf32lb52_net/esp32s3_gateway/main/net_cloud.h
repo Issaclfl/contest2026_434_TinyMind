@@ -9,6 +9,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -32,6 +33,10 @@ void net_cloud_start(void);
 
 /** True once an API key is configured (never logs or serves the key itself). */
 bool net_cloud_configured(void);
+
+/** 网关自己的状态行（路由统计、上行、板子会话、RSSI），与 GET /status 追加在
+ * 模型信息后的那段同源。返回写入字节数。命令模型的 status 动作用它作答。 */
+int net_cloud_status(char *out, size_t out_size);
 
 #ifdef __cplusplus
 }

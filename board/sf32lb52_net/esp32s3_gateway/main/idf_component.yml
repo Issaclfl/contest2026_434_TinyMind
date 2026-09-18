@@ -1,0 +1,5 @@
+## 命令模型的 led 动作需要它：板载 WS2812 由 led_strip 通过 RMT 驱动。
+## 2.5.5 是 ComponentManager 本地缓存里已有的版本（离线也能解析）。
+dependencies:
+  idf: ">=5.0"
+  espressif/led_strip: "^2.5.5"

@@ -1,5 +1,25 @@
 menu "SF32LB52 gateway"
 
+    config GATEWAY_CMD_LED
+        bool "Let the command model drive the onboard RGB led"
+        default y
+        help
+            The local command model can emit {"action":"led","color":...} and
+            the gateway then drives the board's addressable RGB led (a WS2812
+            on the DevKitC-1, driven through RMT).  Turn this off on hardware
+            without one: the action still parses and still reports, it just
+            says the led is disabled.
+
+    config GATEWAY_LED_GPIO
+        int "GPIO of the onboard addressable led"
+        default 48
+        range 0 48
+        help
+            ESP32-S3-DevKitC-1 revisions differ here: rev 1.1 wires the RGB led
+            to GPIO48, earlier revisions to GPIO38.  If the led action reports
+            success but nothing lights up, try 38 -- that is the honest way to
+            find out which board this is, since the LED gives no readback.
+
     config GATEWAY_UPLINK
         bool "Bring up Wi-Fi and NAT the board out to the internet"
         default y

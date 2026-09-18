@@ -33,12 +33,17 @@
 #include "esp_wifi.h"
 
 #include "espllm.h"
+#include "cmd_exec.h"
 #include "net_ppp.h"
 #include "net_wifi.h"
 
 #include "sdkconfig.h"
 
 static const char *TAG = "gw_cloud";
+
+/* 请求里写这个名字（`set_llm <地址> cmd local`）就走到"命令模型 + 动作执行"那条路：
+ * 本地小模型把口令翻成动作 JSON，由 cmd_exec_run 在本板上真的做掉。 */
+#define CMD_MODEL_NAME "cmd"
 
 /* The cloud can think for tens of seconds; the board's agent waits 60 s per
  * attempt and retries, so anything slower than this would not be useful even
@@ -54,6 +59,7 @@ typedef struct {
     uint32_t offline_local; /* no uplink, did not even try */
     uint32_t local_direct;  /* explicitly asked for the local model */
     uint32_t no_key_local;  /* cloud not configured at all */
+    uint32_t cmd_run;       /* ran the command model and executed an action */
 } cloud_stats_t;
 
 static cloud_stats_t s_stats;
@@ -271,6 +277,53 @@ static esp_err_t route(const char *body, size_t body_len, char **response)
         return ESP_ERR_NOT_FOUND;   /* fall through to the local model */
     }
 
+    /* The command model: the board asks for it by name ("cmd"), and what comes
+     * back is not an essay but an action -- cmd_exec_run runs it on this board
+     * and answers with the JSON it executed.  This is the "let the model drive
+     * the hardware" route; the client only needs set_llm ... cmd local. */
+    if (strcmp(model, CMD_MODEL_NAME) == 0) {
+        char text[192] = { 0 };
+        char answer[768];
+        if (!espllm_json_field_last(body, "content", text, sizeof(text))) {
+            snprintf(answer, sizeof(answer), "no command text in the request");
+            ESP_LOGW(TAG, "cmd: no content field");
+        } else {
+            ESP_LOGI(TAG, "cmd: %s", text);
+            if (cmd_exec_run(text, answer, sizeof(answer)) != 0) {
+                ESP_LOGW(TAG, "cmd failed: %s", answer);
+            }
+        }
+        s_stats.cmd_run++;
+        s_last_us = esp_timer_get_time() - t0;
+        strlcpy(s_last_route, "local (command)", sizeof(s_last_route));
+
+        char *esc = malloc(strlen(answer) * 2 + 1);
+        char *resp = malloc(strlen(answer) * 2 + 512);
+        if (esc == NULL || resp == NULL) {
+            free(esc);
+            free(resp);
+            return ESP_ERR_NO_MEM;
+        }
+        size_t o = 0;
+        for (const char *p = answer; *p != '\0' && o + 2 < strlen(answer) * 2 + 1; p++) {
+            if (*p == '"' || *p == '\\') { esc[o++] = '\\'; }
+            if (*p == '\n') { esc[o++] = '\\'; esc[o++] = 'n'; continue; }
+            esc[o++] = *p;
+        }
+        esc[o] = '\0';
+        snprintf(resp, strlen(answer) * 2 + 512,
+                 "{\"id\":\"chatcmpl-cmd\",\"object\":\"chat.completion\","
+                 "\"created\":%lld,\"model\":\"" CMD_MODEL_NAME "\","
+                 "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                 "\"content\":\"%s\"},\"finish_reason\":\"stop\"}],"
+                 "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                 (long long)(esp_timer_get_time() / 1000000), esc);
+        free(esc);
+        *response = resp;
+        ESP_LOGI(TAG, "cmd answered in %.1f s: %s", (esp_timer_get_time() - t0) / 1e6, answer);
+        return ESP_OK;
+    }
+
     if (!net_cloud_configured()) {
         s_stats.no_key_local++;
         strlcpy(s_last_route, "local (no key)", sizeof(s_last_route));
@@ -329,6 +382,13 @@ static int status_lines(char *out, size_t out_size)
         }
     }
     return (int)used;
+}
+
+/* 给命令模型的 status 动作（以及任何想复用网关状态的地方）用：和追加到
+ * GET /status 后面的那段是同一条实现。 */
+int net_cloud_status(char *out, size_t out_size)
+{
+    return status_lines(out, out_size);
 }
 
 /* The router sees every body, so it also records the newest question for the

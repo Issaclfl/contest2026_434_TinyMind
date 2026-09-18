@@ -20,6 +20,7 @@
 #include "net_wifi.h"
 
 #if CONFIG_GATEWAY_LOCAL_LLM
+#include "cmd_exec.h"
 #include "espllm.h"
 #endif
 
@@ -110,9 +111,12 @@ void app_main(void)
     } else if (espllm_http_start(CONFIG_ESPLM_HTTP_PORT) != ESP_OK) {
         ESP_LOGE(TAG, "local model loaded but its HTTP endpoint did not start");
     } else {
-        /* One endpoint, two models: the route decides per request whether an
-         * answer comes from the cloud (when the uplink is there) or from this
-         * device.  The board knows neither the cloud nor this decision. */
+        /* One endpoint, three routes: the cloud (when the uplink is there), the
+         * local model as the fallback, and -- when the client asks for the
+         * model named "cmd" -- the same local model as a *command* parser whose
+         * JSON output is executed on this board.  The board knows neither the
+         * cloud nor this decision. */
+        cmd_exec_init();
         net_cloud_start();
     }
 #else

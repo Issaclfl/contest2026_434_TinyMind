@@ -91,6 +91,34 @@ static void scan_and_report(void)
     }
 }
 
+/* 命令模型要的那个数字版：扫一次，返回可见 AP 数（失败 0）。日志与上面同源。 */
+int net_wifi_scan_count(void)
+{
+    wifi_scan_config_t scan = { .show_hidden = true };
+    if (esp_wifi_scan_start(&scan, true /* block until done */) != ESP_OK) {
+        ESP_LOGW(TAG, "commanded scan failed");
+        return 0;
+    }
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+    wifi_ap_record_t *records = calloc(count ? count : 1, sizeof(wifi_ap_record_t));
+    if (records == NULL) {
+        esp_wifi_clear_ap_list();
+        return 0;
+    }
+    uint16_t on_24 = 0;
+    if (esp_wifi_scan_get_ap_records(&count, records) == ESP_OK) {
+        for (uint16_t i = 0; i < count; i++) {
+            if (records[i].primary <= 14) {
+                on_24++;
+            }
+        }
+    }
+    free(records);
+    ESP_LOGI(TAG, "commanded scan: %u APs visible (%u on 2.4 GHz)", count, on_24);
+    return (int)count;
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;

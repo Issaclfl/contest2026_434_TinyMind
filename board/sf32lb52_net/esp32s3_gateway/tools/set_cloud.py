@@ -99,7 +99,8 @@ def main():
     url = input("URL（回车用默认 https://token-plan-cn.xiaomimimo.com/v1/chat/completions）: ").strip()
     if url:
         lines[URL] = url
-    model = input("模型名（回车用默认 mimo-v2.5-pro）: ").strip()
+    model = input("模型名（回车用默认 mimo-v2.5-pro；该服务端一度对 -pro 回 500，"
+                  "实测 mimo-v2.5 可用）: ").strip()
     if model:
         lines[MODEL] = model
 

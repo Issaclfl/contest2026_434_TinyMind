@@ -385,6 +385,32 @@ is a compact integrated circuit..."），账本回 `cloud ok`。
    地址但没有会话），修法是板上 `kill` 掉 pppd 再 `pppd /dev/ttyS0 460800 &`，
    或让 S3 完整复位一次重新协商。
 
+### 补记：云端模型名不是常量，而这次排查正好验证了降级链路
+
+（2026-09-19）昨天的实测用的是官方同款 `mimo-v2.5-pro`。今天再问时，板子拿到的是
+**本地小模型的回答**（故事味），而状态页 `route` 行写着 `0 cloud ok / 2 fail->local`
+——云端腿每次都失败、降级在工作。S3 日志给出原因：
+
+    I (23927) gw_cloud: model "auto" -> "mimo-v2.5-pro" (16176 -> 16185 B body)
+    W (24747) gw_cloud: cloud answered HTTP 500: {"error":{"code":"500","message":"Internal Server Error",...}}
+    W (24747) gw_cloud: falling back to the local model
+
+从 PC 直连同一个端点（`源码对照/cloud_probe.py`，key 从 sdkconfig 读、脚本只打印
+状态码）同样是 500，且**与请求大小无关**（120 B 与 16 KB 都 500），而
+`GET /v1/models` 返回 200 并列出 `mimo-v2.5` / `mimo-v2.5-pro` / `-tts` / `-asr`
+等。换成 `mimo-v2.5` 后立刻正常：
+
+    [trace:7c5432a9...] iter=0 tool=(none) latency=11665ms llm=ok backend=0
+    [Agent]: A microcontroller is a small, compact integrated circuit that contains a
+             processor, memory, and input/output peripherals, designed to control
+             specific functions in embedded systems like appliances, cars, medical
+             devices, and IoT gadgets.
+
+`route` 行同时变成 `1 cloud ok`。结论：**不是固件的问题，是服务端对某个模型名
+不可用**。而这次排查顺带证明了降级链路是可信的——云端 500 时板上不报错、不卡顿，
+只是回答换了个来源，且状态页与日志都留下了痕迹。模型名可配（`set_cloud.bat` 里填），
+所以这类问题不需要改代码。
+
 ## 九、权重量化：自己写的量化器 + 设备侧量化矩阵乘
 
 **状态：PC 主机侧与设备侧都已实测完成（见 9.4 与 9.6）。**
@@ -531,3 +557,94 @@ fp32 与 int8 逐字符一致，说明设备内核与 PC 内核在做同一件�
     python quant_bench.py <S3 的 WiFi 地址> q8 --save dev_q8.txt
     # PC 侧
     ~/qc/host_check assets/llm_q8.bin "Once upon a time, there was a little robot" 80 0
+
+## 十、命令模型：自己训、自己量化的"能控制硬件"的小模型
+
+前面九节量化的都是**讲故事**的模型——它答得好听，但**不听指令**（0.26M 参数的
+童话续写模型，问它什么都在讲 Benny 的故事）。这一节做的是另一件事：让板子上的
+小模型真的**驱动硬件**。
+
+### 10.1 先找现成的：找过，走不通（记录在案）
+
+| 项目 | 情况 | 为什么用不上 |
+|---|---|---|
+| `cactus-compute/needle` | 26M→121M 参数，2.125 bit 的 `.cact` **私有格式** + 自带运行时；二进制默认带 telemetry | 没有 llama2.c 转换路径；29M 参数起步也远超本板可用的 ~6 MB PSRAM |
+| `memovai/mimimodel` | 45M 参数、2-bit、ESP32 上跑 | 同样是自己的格式与运行时 |
+| `zevorn/rt-claw` | ESP32-C3/S3 上 30+ 工具的真函数调用 | 模型走云端 API，不是端侧 |
+| TinyAgent（EMNLP 2024） | TinyLlama-1.1B 微调做设备控制，思路与我们一致 | 1.1B 参数，本板放不下 |
+| HuggingFace 上的 llama2.c 格式模型 | 只有 TinyStories 的讲故事/普通指令版 | 都不会输出结构化动作 |
+
+（附注：HF 的 API 从本机这条手机热点访问不通，返回的不是 JSON，所以上表结论来自
+网页检索与各仓库页面，而不是 API 列表。）
+
+结论：要在这块板子上"让模型控制硬件"，**必须自己训一个**——这正好也是题目要求的
+"自己量化"。而上表也确认了做法本身可行：小模型 + 闭集动作 + 语法约束，是这类
+项目的共同套路。
+
+### 10.2 三段流水线（全部在本仓库里，可复现）
+
+1. **数据** `tools/make_cmd_dataset.py`：把动作空间做成**闭集**（颜色 6 种、
+   wifi_scan、ping 的 3 个目标、status），再按"动词族"组合生成英文说法。
+   **留出集整族留出**，所以测的是"换个说法还认不认"，不是"背没背下来"。
+   330 条训练 / 46 条留出。
+2. **训练** `tools/train_cmd_model.py`：从 stories260K 微调（torch CPU，**5 分钟**）。
+   只对答案部分算损失；序列以 BOS 收尾——板子上的 `generate()` 采样到 BOS 就停，
+   模型因此学会"说完 JSON 就闭嘴"。分词用 `tools/cmd_model_bpe.py`（上游
+   encode/decode 的 Python 版，逐字节对齐），这样训练与推理喂的是同一个分词结果。
+3. **执行** `main/cmd_exec.c`：模型只输出闭集 JSON，**动作由确定性代码做**
+   （颜色→引脚、target 名字→IP+端口）。理解归模型，映射归代码——这是这个规模
+   唯一可靠的分工。
+
+### 10.3 数字：三个实现给出同一个答案
+
+| 打分方式 | 留出集完全匹配 |
+|---|---|
+| torch（训练框架内） | 43/46 = 93.5% |
+| PC 上编同一份 `espllm_engine.c`（`tools/score_cmd_model.py`） | 43/46 = 93.5% |
+| **int8 量化后**，同一个 PC 打分器 | 43/46 = 93.5% |
+| **真机**（HTTP 打 S3，`源码对照/cmd_device_test.py`） | 43/46 = 93.5% |
+| 微调前同一批 | 0/12 |
+
+训练集 330/330。**量化在这个任务上没有任何损失**——注意这和第九节"讲故事"
+模型的结论不同（那里 int8 会让 13% 的位置翻 argmax）：命令任务的目标是闭集里
+的一个选项，容错空间比自由生成大得多。这条对比本身值得记下来。
+
+速度：从口令到动作 **1.2 s**（S3 侧）、板子经 PPP 问到回执 **3.6 s**。
+
+### 10.4 设备侧动作实测（原样）
+
+    turn on the red light      -> {"action":"led","color":"red","result":"led set"}
+    switch the blue light on   -> {"action":"led","color":"blue","result":"led set"}   ← 留出集说法
+    turn on the white light    -> {"action":"led","color":"white","result":"led set"}
+    scan the wifi networks     -> {"action":"wifi_scan","aps":33}
+    ping the gateway           -> {"action":"ping","target":"gateway","ip":"127.0.0.1","port":80,"rtt_ms":1,...}
+    ping the internet          -> {"action":"ping","target":"internet","ip":"223.5.5.5","port":53,"rtt_ms":48,...}
+    ping the board             -> {"action":"ping","target":"board","ip":"10.0.0.2","port":28789,"rtt_ms":18,...}
+    what is your status        -> 状态行（路由统计 / 上行 / 板子会话 / RSSI）
+
+板子那一侧的完整链路也跑通了（板子控制台原文）：
+
+    vela> set_llm http://10.0.0.1/v1 cmd local
+    LLM backend: 10.0.0.1:80/v1/chat/completions (model: cmd) [router slot 0]
+    vela> ask turn on the yellow light
+    [trace:...] iter=0 tool=(none) latency=3589ms llm=ok backend=0
+    [Agent]: {"action":"led","color":"yellow","result":"led set"}
+
+S3 侧日志（开机与执行）：
+
+    I (6832) gw_cmd: onboard RGB led on GPIO48 (ws2812 via RMT)
+    I (7162) gw_cloud: cmd: turn on the green light please
+    I (8362) gw_cmd: led green -> led set
+    I (8362) gw_cloud: cmd answered in 1.2 s: {"action":"led","color":"green","result":"led set"}
+
+### 10.5 三个诚实的限制
+
+1. **0.26M 参数只能记模式**。留出集错的那 3 条全在"bare"族（`led off`、`red please`、
+   `green please`），其中两条把颜色词当成了别的意图。它不是一个通用助手，是一个
+   **封闭命令集的翻译器**；要加动作或加说法，就扩数据集重训（5 分钟的事）。
+2. **ping 动作测的是到目标端口的 TCP 连接时延**，不是 ICMP：IDF 5.5 的
+   `esp_ping.h` 已经变成兼容壳，真正的 API 挪到了不导出的目录，为它单引一个组件
+   不划算。返回里 `method` 字段如实写着 `tcp_connect`，不假装是 ICMP。
+3. **板载 RGB 灯的引脚随板子版本不同**（rev1.1 是 GPIO48，早期版本 38），
+   menuconfig 里可改；灯没有回读，所以 `result:"led set"` 只表示**写成功了**，
+   是否真的亮着要人看。固件初始化时会打印用的是哪个 GPIO。

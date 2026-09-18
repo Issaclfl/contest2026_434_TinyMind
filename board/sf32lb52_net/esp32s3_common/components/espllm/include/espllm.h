@@ -76,6 +76,12 @@ void espllm_set_status_provider(espllm_status_fn provider);
  * other than a string.  Enough for routing decisions; not a JSON parser. */
 bool espllm_json_field(const char *json, const char *key, char *out, size_t out_size);
 
+/* Same, but the **last** match.  The board's agent sends its system prompt, its
+ * tool catalogue and the user's turn in one body, and the user's turn is the
+ * last "content" -- a first-match search would read the system prompt instead.
+ * The command route needs exactly that one. */
+bool espllm_json_field_last(const char *json, const char *key, char *out, size_t out_size);
+
 /* OpenAI-compatible endpoints on `port`:
  *     GET  /                     dashboard (browser friendly, auto-refresh)
  *     GET  /status               the same information as plain text
