@@ -22,6 +22,7 @@
 #if CONFIG_GATEWAY_LOCAL_LLM
 #include "cmd_exec.h"
 #include "espllm.h"
+#include "voice_exec.h"
 #endif
 
 static const char *TAG = "gw_main";
@@ -117,6 +118,7 @@ void app_main(void)
          * JSON output is executed on this board.  The board knows neither the
          * cloud nor this decision. */
         cmd_exec_init();
+        voice_start();
         net_cloud_start();
     }
 #else

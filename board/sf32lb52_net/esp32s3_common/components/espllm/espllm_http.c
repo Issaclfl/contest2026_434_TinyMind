@@ -33,6 +33,8 @@ static const char *TAG = "espllm.http";
  * letting an arbitrary client make us allocate without bound, not about
  * keeping requests tiny. */
 #define BODY_MAX_BYTES 32768
+/* 语音请求体要大得多：4 秒 16 kHz 单声道是 128 KB，浏览器再 base64 编码也就 171 KB。 */
+#define VOICE_MAX_BYTES (512 * 1024)
 #define PROMPT_MAX_BYTES 512
 
 /* ---------------------------------------------------------------- JSON in -- */
@@ -238,6 +240,8 @@ static esp_err_t send_error(httpd_req_t *req, const char *status, const char *ms
 
 static espllm_router_fn s_router;
 static espllm_status_fn s_status;
+static espllm_voice_fn s_voice;
+static const char *s_voice_page;
 
 void espllm_set_router(espllm_router_fn router)
 {
@@ -247,6 +251,12 @@ void espllm_set_router(espllm_router_fn router)
 void espllm_set_status_provider(espllm_status_fn provider)
 {
     s_status = provider;
+}
+
+void espllm_set_voice(espllm_voice_fn handler, const char *page)
+{
+    s_voice = handler;
+    s_voice_page = page;
 }
 
 bool espllm_json_field(const char *json, const char *key, char *out, size_t out_size)
@@ -510,6 +520,96 @@ static esp_err_t h_chat(httpd_req_t *req)
     return sent;
 }
 
+/* 「按住说话」页面：录一段音、POST 给 /voice、把 JSON 结果打出来。
+ * 采样率按浏览器给的最接近 16 kHz 的值取，然后 3:1 抽到 16 kHz——
+ * 云端转写对 16 kHz 足够，而请求体小四倍。 */
+static const char VOICE_PAGE_HTML[] =
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>talk to the board</title><style>"
+    "body{background:#101418;color:#d8e0e8;font-family:monospace;text-align:center;"
+    "padding:24px}button{font-size:22px;padding:20px 34px;border-radius:12px;border:0;"
+    "background:#7fd0a0;color:#08120c;font-weight:bold}button:active{background:#4f9f78}"
+    "pre{text-align:left;white-space:pre-wrap;font-size:15px;line-height:1.5;"
+    "max-width:640px;margin:18px auto;color:#9fb0c0}</style></head><body>"
+    "<h3>按住说一句英文口令</h3>"
+    "<p><button id=\"b\">按住说话</button></p><pre id=\"o\">（等按钮变成绿色再按）</pre>"
+    "<script>"
+    "let ac,stream,src,node,chunks=[],rec=false;"
+    "async function start(){"
+    " stream=await navigator.mediaDevices.getUserMedia({audio:true});"
+    " ac=new (window.AudioContext||window.webkitAudioContext)();"
+    " src=ac.createMediaStreamSource(stream);node=ac.createScriptProcessor(4096,1,1);"
+    " chunks=[];node.onaudioprocess=e=>{if(rec)chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))};"
+    " src.connect(node);node.connect(ac.destination);rec=true;"
+    " document.getElementById('o').textContent='录音中…说完松开';}"
+    "function wav(){"
+    " let sr=ac.sampleRate,n=0;chunks.forEach(c=>n+=c.length);"
+    " const all=new Float32Array(n);let o=0;chunks.forEach(c=>{all.set(c,o);o+=c.length});"
+    " const step=Math.max(1,Math.round(sr/16000)),m=Math.floor(n/step),buf=new ArrayBuffer(44+m*2),"
+    " v=new DataView(buf);"
+    " const w=(p,s)=>{for(let i=0;i<s.length;i++)v.setUint8(p+i,s.charCodeAt(i))};"
+    " w(0,'RIFF');v.setUint32(4,36+m*2,true);w(8,'WAVEfmt ');v.setUint32(16,16,true);"
+    " v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,16000,true);"
+    " v.setUint32(28,32000,true);v.setUint16(32,2,true);v.setUint16(34,16,true);"
+    " w(36,'data');v.setUint32(40,m*2,true);"
+    " for(let i=0;i<m;i++){let s=all[i*step];s=Math.max(-1,Math.min(1,s));"
+    " v.setInt16(44+i*2,s<0?s*32768:s*32767,true)}"
+    " return new Blob([buf],{type:'audio/wav'});}"
+    "async function stop(){"
+    " rec=false;node.disconnect();src.disconnect();stream.getTracks().forEach(t=>t.stop());"
+    " ac.close();const b=wav();const o=document.getElementById('o');"
+    " o.textContent='上传 '+b.size+' B …';"
+    " const t0=Date.now();"
+    " try{const r=await fetch('/voice',{method:'POST',body:b});"
+    "  o.textContent=await r.text()+'\\n\\n（'+(Date.now()-t0)+' ms）';}"
+    " catch(e){o.textContent='请求失败: '+e;}}"
+    "const btn=document.getElementById('b');"
+    "btn.addEventListener('pointerdown',e=>{e.preventDefault();start()});"
+    "btn.addEventListener('pointerup',e=>{e.preventDefault();stop()});"
+    "</script></body></html>";
+
+static esp_err_t h_talk(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, s_voice_page != NULL ? s_voice_page : VOICE_PAGE_HTML);
+}
+
+static esp_err_t h_voice(httpd_req_t *req)
+{
+    if (s_voice == NULL) {
+        return send_error(req, "503 Service Unavailable", "voice is not configured");
+    }
+    if (req->content_len <= 0 || req->content_len > VOICE_MAX_BYTES) {
+        return send_error(req, "413 Payload Too Large", "audio missing or too large");
+    }
+    char *audio = malloc((size_t)req->content_len);
+    if (audio == NULL) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    size_t total = 0;
+    while (total < (size_t)req->content_len) {
+        int n = httpd_req_recv(req, audio + total, req->content_len - total);
+        if (n <= 0) {
+            free(audio);
+            return send_error(req, "400 Bad Request", "could not read the audio");
+        }
+        total += (size_t)n;
+    }
+    ESP_LOGI(TAG, "voice: %u B of audio", (unsigned)total);
+
+    char *response = NULL;
+    esp_err_t err = s_voice(audio, total, &response);
+    free(audio);
+    if (err != ESP_OK || response == NULL) {
+        free(response);
+        return send_error(req, "500 Internal Server Error", "voice handler failed");
+    }
+    esp_err_t sent = send_json(req, "200 OK", response);
+    free(response);
+    return sent;
+}
+
 esp_err_t espllm_http_start(uint16_t port)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -517,7 +617,7 @@ esp_err_t espllm_http_start(uint16_t port)
     /* Generation runs on this task (see espllm_generate), so its stack has to
      * carry the engine's frames, not just the HTTP parser's. */
     config.stack_size = CONFIG_ESPLM_HTTP_TASK_STACK;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
     /* A full answer can take tens of seconds to produce; the timeout that
@@ -534,6 +634,8 @@ esp_err_t espllm_http_start(uint16_t port)
     const httpd_uri_t uris[] = {
         { .uri = "/", .method = HTTP_GET, .handler = h_dashboard },
         { .uri = "/status", .method = HTTP_GET, .handler = h_status },
+        { .uri = "/talk", .method = HTTP_GET, .handler = h_talk },
+        { .uri = "/voice", .method = HTTP_POST, .handler = h_voice },
         { .uri = "/v1/models", .method = HTTP_GET, .handler = h_models },
         { .uri = "/v1/chat/completions", .method = HTTP_POST, .handler = h_chat },
     };

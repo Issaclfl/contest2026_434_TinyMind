@@ -1,5 +1,18 @@
 menu "SF32LB52 gateway"
 
+    config GATEWAY_ASR_MODEL
+        string "Model used to transcribe voice commands"
+        default "mimo-v2.5-asr"
+        help
+            The voice route sends the recorded audio to this model at the same
+            endpoint as the chat route.  Two things are worth knowing:
+              * the ASR model wants an **audio-only** request: sending a text
+                prompt alongside the audio is rejected ("ASR request must not
+                include text parts"), so voice_exec.c sends the audio alone;
+              * using the general chat model instead also works but spends
+                7-8 s thinking before it transcribes, against 1.6 s for this
+                one (both measured, see the evidence doc §十一).
+
     config GATEWAY_CMD_LED
         bool "Let the command model drive the onboard RGB led"
         default y

@@ -71,6 +71,18 @@ typedef int (*espllm_status_fn)(char *out, size_t out_size);
 void espllm_set_router(espllm_router_fn router);
 void espllm_set_status_provider(espllm_status_fn provider);
 
+/* ---- 语音入口（组件不关心音频从哪来、送去哪）---------------------------------
+ *
+ * POST /voice 会把请求体原样交给 handler（WAV 或裸 PCM，最大 512 KB），
+ * handler 返回一段 JSON 字符串作为响应 —— 和 router 是同一个约定。
+ *
+ * GET /talk 直接把 page 当网页发出去。它不是状态页，而是给手机/电脑用的
+ * "按住说话"页面：录一段音、POST 给 /voice、把结果打出来。page 为 NULL 时
+ * 这个路由会说"没配置语音"。 */
+typedef esp_err_t (*espllm_voice_fn)(const char *audio, size_t audio_len, char **response);
+
+void espllm_set_voice(espllm_voice_fn handler, const char *page);
+
 /* Copies the first JSON string value stored under `key` into out (decoded,
  * NUL-terminated).  False when there is no such key or it holds something
  * other than a string.  Enough for routing decisions; not a JSON parser. */

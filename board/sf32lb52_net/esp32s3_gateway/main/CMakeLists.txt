@@ -5,6 +5,7 @@ idf_component_register(
         "net_ppp.c"
         "net_cloud.c"
         "cmd_exec.c"
+        "voice_exec.c"
     INCLUDE_DIRS "."
     REQUIRES
         espllm          # ../esp32s3_common/components/espllm

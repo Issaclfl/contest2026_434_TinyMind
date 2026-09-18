@@ -648,3 +648,52 @@ S3 侧日志（开机与执行）：
 3. **板载 RGB 灯的引脚随板子版本不同**（rev1.1 是 GPIO48，早期版本 38），
    menuconfig 里可改；灯没有回读，所以 `result:"led set"` 只表示**写成功了**，
    是否真的亮着要人看。固件初始化时会打印用的是哪个 GPIO。
+
+## 十一、语音：说一句就控制（云听、端选）
+
+### 11.1 分工，以及它是怎么定下来的
+
+一开始想让云端一次性做完"听 + 出动作 JSON"：把音频发过去，让它直接回
+`{"action":...}`。实测不行——那是个思考型模型，**800 token 全花在自言自语上**，
+JSON 还没轮到输出（日志里能看到它反复念我给的提示词）。但同一段音频让它**只做
+转写**，一次就对：
+
+    我合成的 "turn on the red light" -> 转写 "Turn on the red light"
+
+于是分工定成：**云负责听（自由说法都能听），端负责选（动作词汇表不出这块板子）**。
+后者正是第十节那个自己训的 0.26M 命令模型，留出集 43/46。
+
+### 11.2 转写模型：专用 ASR 比通用模型快 5 倍
+
+| 用哪个模型转写 | 延迟 | 说明 |
+|---|---|---|
+| `mimo-v2.5`（通用 chat） | **7.7 s** | 能用，但先自言自语一段 |
+| `mimo-v2.5-asr`（专用） | **1.6 s** | 要求**只发音频**：带文字提示会被拒（`ASR request must not include text parts`）|
+
+所以 `voice_exec.c` 发的是**纯音频**请求，模型名走 `GATEWAY_ASR_MODEL`。
+
+### 11.3 端到端实测（真机，源码对照/cloud_probe.py 造音、curl 打 /voice）
+
+    turn on the red light     3.2s  {"transcript":"Turn on the red light.","ok":true,
+                                      "result":{"action":"led","color":"red","result":"led set"}}
+    switch the blue light on  3.8s  {"action":"led","color":"blue"}（留出集说法）
+    could you please make the light green  11.0s（换 ASR 模型前）
+                                           -> {"action":"led","color":"green"}
+    scan the wifi networks    13.4s  {"action":"wifi_scan","aps":36}
+    what is your status        3.2s  {"action":"status", ...}
+
+拆开看是：上传 ~0.2 s + 转写 1.6 s + 本地命令模型 1.2 s + 动作本身（扫 WiFi 那条约
+10 s 是因为扫描要 2~3 s，且它是在换 ASR 模型之前测的）。
+
+### 11.4 入口：一个手机能打开的页面
+
+网关现在在 `GET /talk` 提供一个**按住说话**的页面（浏览器 `getUserMedia` 录音 →
+在 JS 里降到 16 kHz 单声道、封成 WAV → `POST /voice`）。手机或电脑连同一个热点，
+打开 `http://<网关地址>/talk` 就能用。
+
+**这条腿的边界写清楚**：音频输入用的是浏览器（手机/电脑的麦克风），不是板子的
+麦克风——板子的采集通路单独验证过（48 kHz 立体声、零丢包，见音频证据），把这
+两段接起来是下一步的事。另外**语音这条腿需要联网**（听在云端）；断网时打字的口令
+仍然可用，那条路完全是本地的。
+
+（页面里的 JS 做过语法检查；真机浏览器上的完整交互待用户实测。）
