@@ -139,10 +139,12 @@ Agent [netmgr] Network connected: 10.0.0.2
 
 ### 诚实说明
 
-- **放音已实测跑通，听感待确认**：接上 4Ω/3W 喇叭后，`nxplayer` 的纯音与 `playraw`
+- **放音已实测跑通，喇叭出声也已人耳确认**：接上 4Ω/3W 喇叭后，`nxplayer` 的纯音与 `playraw`
   回放**都能自然播完并自动结束会话**（驱动按 `AUDIO_APB_FINAL` 交 `COMPLETE`），采集
-  侧随之补齐了通道配置。数字通路有完整串口日志（`docs/audio-evidence/playback-loop-48k-stereo.log`），
-  **"喇叭里到底听到了什么"需要人耳确认**，本仓不替它下结论。技术报告 3.5.4 / 3.7.3 有完整记录。
+  侧随之补齐了通道配置；实测时人耳先听到 1 kHz 纯音、随后听到刚录那段音频的回放，两段可分辨。
+  数字通路有完整串口日志（`docs/audio-evidence/playback-loop-48k-stereo.log`）。
+  **音量大小、失真程度、上电断电爆音未做专项测量**，故不宣称"出声质量已验收"。
+  技术报告 3.5.2 / 3.5.4 / 3.7.3 有完整记录。
 - **语音通道（第 3 层之上的"对话"）未完成，且已查清为什么**：Agent 的默认语音后端走
   Vela 媒体框架（`media_recorder`），而该框架建在 FFmpeg + PFW 插件之上
   （`frameworks/multimedia/media/`），`CONFIG_MEDIA` 依赖 `LIB_FFMPEG`——在 armv8-m 上

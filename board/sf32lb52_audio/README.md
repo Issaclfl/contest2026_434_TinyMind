@@ -187,7 +187,8 @@ Memory region         Used Size  Region Size  %age Used
 
 **验证状态**：M1/M2/M3 均已在真机验证（证据表见 **7.7** 与 **7.8**）。采集方向有 30 秒连续录音、
 零丢包、WAV 回放听感与波形统计；放音方向的数字通路已跑通（纯音与 `playraw` 自然播完、
-会话自动结束），**出声听感尚待人耳确认**——本仓不替人耳下结论。
+会话自动结束），且**喇叭实际出声已由人耳确认**（2026-09-19：先听到 1 kHz 纯音、随后听到
+录音回放，两段可分辨）。音量大小、失真程度、上电/断电爆音未做专项测量。
 
 ---
 
@@ -389,14 +390,16 @@ AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有 `AUDIO_MSG_COMP
 | 音频内容 | 峰值 32715 / RMS 285.8，52.4 万样本中 52.1 万非零，波形平滑连续 → ADC 在真实转换模拟输入 |
 | 可播放产物 | 导出为 16 kHz 单声道 WAV（32.8 秒），已在 PC 上实际播放验证 |
 | `stop` 之后 | 板子仍正常响应（`uname -a` 正常返回），多次会话可重复 |
-| **放音：纯音与回环**（2026-09-19 新增） | `nxplayer tone 48000 2 1000` 与 `nxplayer playraw /data/loop.pcm 2 16 48000 0` 都走完 `playback started → final buffer served → end of stream, COMPLETE queued`，会话自动结束；2 秒纯音耗时 **2.4 秒**（速率≈实时）；`gave back 0 queued playback buffer(s)`，应用侧缓冲对账为零 |
+| **放音：纯音与回环**（2026-09-19 新增） | `nxplayer tone 48000 2 1000` 与 `nxplayer playraw /data/loop.pcm 2 16 48000 0` 都走完 `playback started → final buffer served → end of stream, COMPLETE queued`，会话自动结束；2 秒纯音耗时 **2.4 秒**（速率≈实时）；`gave back 0 queued playback buffer(s)`，应用侧缓冲对账为零；**人耳确认喇叭出声**（先 1 kHz 纯音、后录音回放，两段可分辨） |
 | **采集格式对账**（2026-09-19 新增） | 48kHz/2ch 4 秒落盘 **802,816 字节**（≈192 kB/s）、16kHz/1ch 4 秒落盘 **131,072 字节**（≈32 kB/s）；修复前 48kHz/2ch 只有约一半（见 7.8 ②） |
 
 **可听证据**：`docs/audio-evidence/board-capture-16k-mono.wav`（板子录到的真实音频）。
 
 **放音串口完整记录**：`docs/audio-evidence/playback-loop-48k-stereo.log`；
 **采集格式对账记录**：`docs/audio-evidence/capture-format-matrix.log`。
-**出声听感（音量/失真/爆音）尚未经人耳确认**——数字通路证据只到这里。
+**出声人耳确认（2026-09-19）**：按上述命令实测，人耳听到 1 kHz 纯音与随后的录音回放，两段可分辨，
+放音链路（DMA → DAC → Class-D 功放 → 喇叭）确认出声。**音量大小、失真程度、上电/断电爆音
+未做专项测量**——量化数据只到数字通路这一层。
 
 ### 7.8 上板第三轮：放音与采集的两个"静默降级"缺陷（2026-09-19）
 
