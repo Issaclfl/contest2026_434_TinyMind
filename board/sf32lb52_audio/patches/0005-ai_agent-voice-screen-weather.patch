@@ -248,7 +248,7 @@ index 9d676c2..1267493 100644
  
      /* Kick off WiFi reconnect and start outbound dispatch immediately.
 diff --git a/src/channels/nsh_commands.c b/src/channels/nsh_commands.c
-index 25875b5..474c8b3 100644
+index 25875b5..78682ba 100644
 --- a/src/channels/nsh_commands.c
 +++ b/src/channels/nsh_commands.c
 @@ -41,6 +41,9 @@
@@ -261,7 +261,7 @@ index 25875b5..474c8b3 100644
  #include "agent_compat.h"
  #include "agent_config.h"
  
-@@ -596,6 +599,116 @@ static void cmd_ask(int argc, char** argv)
+@@ -596,6 +599,140 @@ static void cmd_ask(int argc, char** argv)
      syslog(LOG_INFO, "[agent] ask: %s\n", content);
  }
  
@@ -370,6 +370,30 @@ index 25875b5..474c8b3 100644
 +        return;
 +    }
 +
++    /* Show what is being announced: the screen should say the same thing the
++     * speaker does.  Text mirrors make_voice_clips.py's phrase list. */
++
++    static const struct {
++        const char* name;
++        const char* text;
++    } phrases[] = {
++        { "light_on",  "客厅灯已打开" },
++        { "light_off", "客厅灯已关闭" },
++        { "red_on",    "红灯已打开" },
++        { "blue_on",   "蓝灯已打开" },
++        { "offline",   "网络已断开，已切换到本地控制" },
++        { "ok",        "好的" },
++        { "unknown",   "没有听懂，请再说一遍" },
++        { "temp_high", "注意，芯片温度偏高" },
++    };
++
++    for (size_t i = 0; i < sizeof(phrases) / sizeof(phrases[0]); i++) {
++        if (strcmp(argv[1], phrases[i].name) == 0) {
++            agent_screen_show(phrases[i].text);
++            break;
++        }
++    }
++
 +    int ret = voice_say_clip(argv[1]);
 +    if (ret != 0)
 +        printf("clip failed: %d\n", ret);
@@ -378,7 +402,7 @@ index 25875b5..474c8b3 100644
  static void cmd_cron_start(void)
  {
      if (cron_service_start() == OK) {
-@@ -975,6 +1088,14 @@ static void* cli_thread(void* arg)
+@@ -975,6 +1112,14 @@ static void* cli_thread(void* arg)
              cmd_heartbeat_trigger();
          else if (strcmp(cmd, "ask") == 0)
              cmd_ask(argc, argv);
