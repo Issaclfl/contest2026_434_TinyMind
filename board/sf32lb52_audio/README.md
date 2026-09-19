@@ -504,4 +504,41 @@ USB-C 线，PPP 到 PC）或 UART2 + USB-TTL / ESP32-S3 网关，**都需要物�
 > （回车、`help`、`ifconfig` 全无回显，软件侧救不回来）。恢复只有物理 Reset 或重新烧录
 > （sftool 会让芯片复位，实测重烧后控制台即恢复）。**演示时不要敲 `quit`，也不要敲 `restart`。**
 
+### 7.10 屏幕点亮：让"说出来的话"同时出现在屏上（2026-09-20）
+
+接上屏后启动日志**不再出现** `ft6146_touch_initialize failed: -5`（未接屏时每次都有），
+并且 `lv_nuttx_lcd_create: lcd /dev/lcd0 open success`、`touchscreen /dev/input0 open success,
+maxpoint 1` —— 面板与触摸都被认到。面板是 **CO5300 驱动的 AMOLED**，本板配置
+**390×450**（`CONFIG_LCD_HOR_RES_MAX=390` / `VER_RES_MAX=450`）。
+
+**为什么没直接用上游那套聊天气泡 UI**（`packages/ai_agent/src/ui/lvgl_ui_channel.c`）：
+三处不匹配，都是量过之后才下的结论。
+
+| 维度 | 上游假设 | 本板实际 |
+|---|---|---|
+| 几何 | 466×466 圆形表盘（`LVGL_UI_SCREEN_W/H 466`） | 390×450 方形 |
+| 中文字体 | Vela 字体服务 `vg_font_create("MiSans-Medium")` 或 FreeType | 都没有（`CONFIG_LV_USE_FREETYPE` 未开） |
+| LVGL 归属 | 系统（miwear）已初始化 LVGL 并持有显示 | 裸开发板上没人初始化 |
+
+**做法**：新增 `src/ui/agent_screen.c`，照 `apps/examples/lvgldemo` 的方式自己拉 LVGL
+（`lv_init` → `lv_nuttx_dsc_init`(fb=/dev/lcd0, input=/dev/input0) → `lv_nuttx_init`），
+建一块标签屏，字体用 LVGL 自带的 **`lv_font_simsun_16_cjk`**（约 2500 常用字，不需要
+FreeType、不需要外挂字体文件），`agent_main` 在 CLI 通道打印回答时同步上屏，`say <文本>`
+也上屏——"看的"和"听的"是同一句话。
+
+**两个踩过的坑**（都属于"编译通过、上板才知道"）：
+
+1. **屏幕设备是异步注册的**。第一次实现把 LVGL 初始化放在 agent 启动流程里（P4，+275 ms），
+   日志报 `[screen] no display on /dev/lcd0`（`rc=-19`）——因为 LCD 驱动由板级 worker
+   任务稍后才注册设备节点。改成**独立线程先等设备出现（最多 20 s）再初始化**，同时所有
+   LVGL 调用都收在那一个线程里（LVGL 非线程安全），文本经待更新缓冲区交接。
+2. **defconfig 改字体必须清构建目录重编**。加了 `CONFIG_LV_FONT_SIMSUN_16_CJK=y` 后增量
+   构建仍打印 `[screen] CJK font not built in: Chinese will not render`——与 7.8 开
+   `nxplayer` 是同一个坑（incremental build 不重读 defconfig）。删掉 `out/<config>` 重来才生效。
+3. 另外 LVGL 的 NuttX 移植会检查栈大小（`check_stack_size`），8 KB 被判太小，
+   任务栈提到 16 KB 才安静。
+
+**当前状态**：屏与触摸可用、agent 文本可上屏（内置中文字体已生效）。要在屏上显示
+**带网络的实时回答**（如天气），仍需要板子有上网手段——见 7.9 末段。
+
 

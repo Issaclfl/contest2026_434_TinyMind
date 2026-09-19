@@ -766,10 +766,10 @@ index 7499684..7e2a3c9 100644
  
 diff --git a/src/ui/agent_screen.c b/src/ui/agent_screen.c
 new file mode 100644
-index 0000000..009287a
+index 0000000..815f8cc
 --- /dev/null
 +++ b/src/ui/agent_screen.c
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,226 @@
 +/*
 + * Copyright (C) 2026 Xiaomi Corporation
 + *
@@ -817,8 +817,9 @@ index 0000000..009287a
 +static const char* TAG = "screen";
 +
 +#define SCREEN_TEXT_MAX 512
-+#define SCREEN_TASK_STACK 8192
++#define SCREEN_TASK_STACK 16384 /* LVGL's NuttX port asks for >= 8192 */
 +#define SCREEN_TASK_PRIO 90   /* below the audio/agent threads */
++#define SCREEN_WAIT_MS 20000  /* how long to wait for the display to appear */
 +
 +static lv_display_t* s_disp;
 +static lv_obj_t* s_title;
@@ -826,16 +827,93 @@ index 0000000..009287a
 +static pthread_t s_task;
 +static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 +static char s_pending[SCREEN_TEXT_MAX];
++static char s_fb_path[64];
++static char s_input_path[64];
 +static volatile bool s_has_pending;
 +static volatile bool s_running;
 +static bool s_inited;
 +
-+/* Runs in the LVGL task: every LVGL call happens here, which is what keeps
-+ * the label update safe against the render timer. */
++/* Bring-up runs in its own thread for two reasons: the LCD and touch nodes
++ * are registered by a deferred board task, so they may not exist yet when the
++ * agent boots; and LVGL is single-threaded, so the thread that initializes it
++ * is also the one that must pump lv_timer_handler(). */
 +
 +static void* screen_task(void* arg)
 +{
++    const char* fb = s_fb_path;
++    const char* input = s_input_path;
++    lv_nuttx_dsc_t info;
++    lv_nuttx_result_t result;
++    int waited = 0;
++
 +    (void)arg;
++
++    while (waited < SCREEN_WAIT_MS) {
++        if ((!fb || access(fb, F_OK) == 0) && (!input || access(input, F_OK) == 0)) {
++            break;
++        }
++
++        usleep(500 * 1000);
++        waited += 500;
++    }
++
++    if (fb && access(fb, F_OK) != 0) {
++        syslog(LOG_WARNING, "[%s] %s never appeared (waited %d ms): no screen\n",
++            TAG, fb, waited);
++        return NULL;
++    }
++
++    lv_init();
++    lv_nuttx_dsc_init(&info);
++
++    if (fb) {
++        info.fb_path = fb;
++    }
++
++    if (input) {
++        info.input_path = input;
++    }
++
++    lv_nuttx_init(&info, &result);
++    if (result.disp == NULL) {
++        syslog(LOG_WARNING, "[%s] no display on %s\n", TAG, fb ? fb : "(default)");
++        return NULL;
++    }
++
++    s_disp = result.disp;
++
++    lv_obj_t* scr = lv_obj_create(NULL);
++    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101018), 0);
++    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
++    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
++
++    s_title = lv_label_create(scr);
++    lv_label_set_text(s_title, "TinyMind");
++    lv_obj_set_style_text_color(s_title, lv_color_hex(0x7fd1ff), 0);
++    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 12);
++
++    s_body = lv_label_create(scr);
++    lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);
++    lv_obj_set_width(s_body, lv_pct(88));
++    lv_obj_set_style_text_color(s_body, lv_color_hex(0xf0f0f0), 0);
++    lv_label_set_text(s_body, "就绪");
++    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 0);
++
++#if LV_FONT_SIMSUN_16_CJK
++    /* Chinese needs a CJK-capable font; the default Montserrat has no
++     * glyphs for it and the text would come out blank. */
++    lv_obj_set_style_text_font(s_title, &lv_font_simsun_16_cjk, 0);
++    lv_obj_set_style_text_font(s_body, &lv_font_simsun_16_cjk, 0);
++    syslog(LOG_INFO, "[%s] using built-in CJK font\n", TAG);
++#else
++    syslog(LOG_WARNING, "[%s] CJK font not built in: Chinese will not render\n",
++        TAG);
++#endif
++
++    lv_screen_load(scr);
++    s_running = true;
++
++    syslog(LOG_INFO, "[%s] up: %s\n", TAG, fb ? fb : "(default)");
 +
 +    while (s_running) {
 +        if (s_has_pending) {
@@ -856,8 +934,7 @@ index 0000000..009287a
 +
 +int agent_screen_init(const char* fb_path, const char* input_path)
 +{
-+    lv_nuttx_dsc_t info;
-+    lv_nuttx_result_t result;
++    pthread_attr_t attr;
 +
 +    if (s_inited) {
 +        return OK;
@@ -865,72 +942,24 @@ index 0000000..009287a
 +
 +    s_inited = true;
 +
-+    lv_init();
-+    lv_nuttx_dsc_init(&info);
-+
 +    if (fb_path) {
-+        info.fb_path = fb_path;
++        strncpy(s_fb_path, fb_path, sizeof(s_fb_path) - 1);
 +    }
 +
 +    if (input_path) {
-+        info.input_path = input_path;
++        strncpy(s_input_path, input_path, sizeof(s_input_path) - 1);
 +    }
 +
-+    lv_nuttx_init(&info, &result);
-+    if (result.disp == NULL) {
-+        syslog(LOG_WARNING, "[%s] no display on %s\n", TAG,
-+            fb_path ? fb_path : "(default)");
-+        return -ENODEV;
-+    }
-+
-+    s_disp = result.disp;
-+
-+    lv_obj_t* scr = lv_obj_create(NULL);
-+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101018), 0);
-+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-+
-+    s_title = lv_label_create(scr);
-+    lv_label_set_text(s_title, "TinyMind");
-+    lv_obj_set_style_text_color(s_title, lv_color_hex(0x7fd1ff), 0);
-+    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 12);
-+
-+    s_body = lv_label_create(scr);
-+    lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);
-+    lv_obj_set_width(s_body, lv_pct(88));
-+    lv_obj_set_style_text_color(s_body, lv_color_hex(0xf0f0f0), 0);
-+    lv_label_set_text(s_body, "ready");
-+    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 0);
-+
-+#if LV_FONT_SIMSUN_16_CJK
-+    /* Chinese needs a CJK-capable font; the default Montserrat has no
-+     * glyphs for it and the text would come out blank. */
-+    lv_obj_set_style_text_font(s_title, &lv_font_simsun_16_cjk, 0);
-+    lv_obj_set_style_text_font(s_body, &lv_font_simsun_16_cjk, 0);
-+    syslog(LOG_INFO, "[%s] using built-in CJK font\n", TAG);
-+#else
-+    syslog(LOG_WARNING, "[%s] CJK font not built in: Chinese will not render\n",
-+        TAG);
-+#endif
-+
-+    lv_screen_load(scr);
-+
-+    s_running = true;
-+
-+    pthread_attr_t attr;
 +    pthread_attr_init(&attr);
 +    pthread_attr_setstacksize(&attr, SCREEN_TASK_STACK);
 +
 +    if (pthread_create(&s_task, &attr, screen_task, NULL) != 0) {
-+        syslog(LOG_ERR, "[%s] lvgl task create failed\n", TAG);
-+        s_running = false;
++        syslog(LOG_ERR, "[%s] bring-up thread create failed\n", TAG);
 +        pthread_attr_destroy(&attr);
 +        return -EIO;
 +    }
 +
 +    pthread_attr_destroy(&attr);
-+
-+    syslog(LOG_INFO, "[%s] up: %s\n", TAG, fb_path ? fb_path : "(default)");
 +    return OK;
 +}
 +
