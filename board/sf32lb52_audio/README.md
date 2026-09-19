@@ -110,7 +110,7 @@ nxrecorder> record
 |------|------|------|
 | `src/CMakeLists.txt` | `SRCS` 追加 `bsp_audio.c bsp_audio_hw.c` | 让驱动进编译 |
 | `drivers/CMakeLists.txt` | 新增 `target_compile_options(... -w)` | 厂商 HAL 头（`bf0_hal_audcodec.h`）含无原型声明，新版工具链 `-Werror` 下编译失败 |
-| `configs/nsh/defconfig` | 新增 `CONFIG_AUDIO=y`、`CONFIG_SYSTEM_NXRECORDER=y` | 启用音频框架；并启用 NuttX 自带 `nxrecorder` 作为真机验证工具 |
+| `configs/nsh/defconfig` | 新增 `CONFIG_AUDIO=y`、`CONFIG_SYSTEM_NXPLAYER=y`、`CONFIG_SYSTEM_NXRECORDER=y` | 启用音频框架；并启用 NuttX 自带的 `nxrecorder` / `nxplayer` 作为真机验证工具（`ai_agent` 配置同样处理，见 `ai_agent_port/`） |
 | `src/sifli_ap.c` | 新增 include + `audio_register("/dev/audio0", ...)` | 启动时注册设备节点 |
 
 `apply.sh` 以**文件覆盖**而非 `patch` 方式落盘，避免上下文偏移导致应用失败；`patches/` 同时提供标准 diff 便于评审审阅。
@@ -178,12 +178,16 @@ Memory region         Used Size  Region Size  %age Used
   代码里显式设置 `dest_sel` 并加注释说明，避免日后被误改。
 - 采集方向在每个半区交付前 `up_invalidate_dcache()`，放音方向在回填后
   `up_clean_dcache()`；启动前对整块暂存区 `up_flush_dcache()`。
-- `stop()` 会把 `pendq` 中尚未服务的缓冲全部以 `nbytes = 0` 交还上层，
-  否则 `nxrecorder` 会一直等不可能完成的缓冲。
-- 中断里只做一次有界 memcpy 加上层回调（NuttX 明确允许上层回调在中断上下文调用）。
+- `stop()` 对两个方向区别对待：**采集**把 `pendq` 里未服务的缓冲直接丢掉（上层即将退出，
+  自己会用 `AUDIOIOC_FREEBUFFER` 释放；再交还一次会让它把录音尾巴写第二遍）；**放音**必须
+  以 `nbytes = 0` 交还（播放器自己记着"还没看到归还的缓冲数"，在 `COMPLETE` 时对账）。
+- 中断里只做一次有界 memcpy 加上层回调（NuttX 明确允许上层回调在中断上下文调用）；
+  播放流收到带 `AUDIO_APB_FINAL` 的缓冲后，再等两个半区（约一个 DMA 周期、把尾巴真的送出去）
+  才交 `AUDIO_CALLBACK_COMPLETE`，避免提前停机切掉结尾。
 
-**尚未验证**：以上均为编译期与符号级验证。**真机行为（能否真正录到音、放音是否出声）
-尚未实测**，需上板后按 `docs/上板验证清单.md` 走一遍。本仓不含未经实测的性能数据。
+**验证状态**：M1/M2/M3 均已在真机验证（证据表见 **7.7** 与 **7.8**）。采集方向有 30 秒连续录音、
+零丢包、WAV 回放听感与波形统计；放音方向的数字通路已跑通（纯音与 `playraw` 自然播完、
+会话自动结束），**出声听感尚待人耳确认**——本仓不替人耳下结论。
 
 ---
 
@@ -385,8 +389,68 @@ AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有 `AUDIO_MSG_COMP
 | 音频内容 | 峰值 32715 / RMS 285.8，52.4 万样本中 52.1 万非零，波形平滑连续 → ADC 在真实转换模拟输入 |
 | 可播放产物 | 导出为 16 kHz 单声道 WAV（32.8 秒），已在 PC 上实际播放验证 |
 | `stop` 之后 | 板子仍正常响应（`uname -a` 正常返回），多次会话可重复 |
+| **放音：纯音与回环**（2026-09-19 新增） | `nxplayer tone 48000 2 1000` 与 `nxplayer playraw /data/loop.pcm 2 16 48000 0` 都走完 `playback started → final buffer served → end of stream, COMPLETE queued`，会话自动结束；2 秒纯音耗时 **2.4 秒**（速率≈实时）；`gave back 0 queued playback buffer(s)`，应用侧缓冲对账为零 |
+| **采集格式对账**（2026-09-19 新增） | 48kHz/2ch 4 秒落盘 **802,816 字节**（≈192 kB/s）、16kHz/1ch 4 秒落盘 **131,072 字节**（≈32 kB/s）；修复前 48kHz/2ch 只有约一半（见 7.8 ②） |
 
 **可听证据**：`docs/audio-evidence/board-capture-16k-mono.wav`（板子录到的真实音频）。
+
+**放音串口完整记录**：`docs/audio-evidence/playback-loop-48k-stereo.log`；
+**采集格式对账记录**：`docs/audio-evidence/capture-format-matrix.log`。
+**出声听感（音量/失真/爆音）尚未经人耳确认**——数字通路证据只到这里。
+
+### 7.8 上板第三轮：放音与采集的两个"静默降级"缺陷（2026-09-19）
+
+接上 4Ω 喇叭跑放音验证时又挖出两个缺陷。它们的共同点是**不报错、不崩溃，只是安静地不工作**，
+而且都在厂商 HAL 里同一处：**通道配置只写进 handle 结构体是不够的，寄存器由
+`HAL_AUDPRC_Config_{T,R}Chanel()` 写下去**。
+
+#### (1) 放音 DMA 一步都不走
+
+**现象**：`nxplayer` 打印 `playback config` / `playback started` 之后就什么都没有；
+`stop: overruns=0`（**连一次半区中断都没来**）；紧接着再播放报 `Audio device busy`；
+退出 `nxplayer` 时触发它自己的 `DEBUGASSERT(outstanding == 0)` 崩溃并打印寄存器。
+
+**定位**：三条现象共同指向"传输 DMA 从未前进"。对照厂商 SDK 的 replay 配置路径
+（`drv_audprc.c:1018` 显式调用 `HAL_AUDPRC_Config_TChanel(haudprc, 0, &cfg)`）后确认：
+我们的 `config_playback()` 只做了 `g_audprc.cfg1 = prc_cfg;`——**那只把结构体存进 handle**。
+
+**根因**：TX 通道保持复位默认值（`AUDPRC_TX_CH0_CFG.ENABLE == 0`）→ AUDPRC 不向 DMA 发请求
+→ 无半区中断、无 `DEQUEUE` 回调、无 `COMPLETE`，应用永远停在 PLAYING。
+采集方向之所以一直"看起来正常"，是因为 `HAL_AUDPRC_Receive_DMA()` 内部替我们写了 RX 行；
+**TX 没有这一步**。
+
+**修复**：`config_playback()` 补 `HAL_AUDPRC_Config_TChanel(&g_audprc, 0, &g_audprc.cfg1)`。
+修复后立刻能看到 `stop: overruns=5`（DMA 真在跑），流自然播完。
+
+#### (2) 48kHz/2ch 采集被静默降级成单声道
+
+**现象**：不报任何错，`capture config: 48000Hz 2ch 16bit` 照常打印，但**同一时长下落盘字节数
+只有标称的一半**：6 秒只落 589,824 字节——而 589,824 ÷ 6 s ≈ 98 kB/s，**恰好等于"48kHz 单声道"**。
+
+**定位**：把"文件字节数 ÷ 墙钟时长"与"标称字节率"做三组对比：16kHz/1ch 对得上，
+48kHz/2ch 差一半。既然 (1) 已经证明"handle 结构体 ≠ 寄存器"，回查采集路径——同样漏了
+`HAL_AUDPRC_Config_RChanel()`。
+
+**根因**：RX 通道跑复位默认值（16bit **单声道**），宿主请求的 2ch 从未写进硬件。
+所谓"48kHz 立体声录音"其实是单声道数据被按双声道解析。
+
+**修复**：`config_capture()` 补 `HAL_AUDPRC_Config_RChanel(&g_audprc, 0, &g_audprc.cfg)`。
+修复后 48kHz/2ch 4 秒落盘 802,816 字节（≈192 kB/s），与 16kHz/1ch 的 131,072 字节（≈32 kB/s）
+速率一致。
+
+**附带发现**：板载只有一颗麦克风，立体声采集时**右声道恒为数字 0**。要真实音频内容，
+按单声道采集（`recordraw <file> 1 16 16000 0`）。
+
+#### (3) 顺带补上的两处完成语义
+
+同一轮还补了两件事，否则播放器仍然收不了尾：①驱动认出上层标的 `AUDIO_APB_FINAL`，
+把尾巴真的送出去（再等两个半区）后交 `AUDIO_CALLBACK_COMPLETE`；②`stop()` 对放音方向
+把 `pendq` 里未服务的缓冲以 `nbytes = 0` 交还上层（采集方向仍保持"丢弃"，原因见 6.2）。
+
+**经验**：**"日志正常"不等于"硬件被配过"**。这两个缺陷都不产生任何错误码，唯一的破绽是
+**"字节数/时序与标称值对不上"**——所以驱动验证必须做数值对账（落盘字节 ÷ 时长、中断次数 ×
+半区大小），而不是只看日志有没有报错。这一条与 7.7 里"不报错不等于成功"是同一类教训，
+只是这次藏在 HAL 的"配置结构体 vs 寄存器"之间。
 
 > **一个值得记录的工程教训**：本次曾出现"提交仓里 `.c` 与 `.h` 不匹配、评审 clone
 > 后必然编译失败"的情况——原因是本地同步脚本只同步了 `.c` 而漏了 `.h`，而工作树里

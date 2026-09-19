@@ -90,6 +90,10 @@ struct sf32lb52_audio_s
 
   dq_queue_t pendq;               /* Pending ap_buffers (FIFO) */
   uint32_t   overruns;            /* Halves dropped because pendq ran dry */
+  uint8_t    final_drain;         /* Playback: staging halves still to flush
+                                   * after the AUDIO_APB_FINAL buffer went out */
+  bool       complete_sent;       /* Playback: COMPLETE already queued for the
+                                   * end of this stream */
   struct work_s complete_work;    /* Defers AUDIO_CALLBACK_COMPLETE off the
                                    * stop() call path (see sf32lb52_stop) */
 };
@@ -126,6 +130,7 @@ static void sf32lb52_stage_callback(uint8_t dir, uint8_t half);
 static uint32_t sf32lb52_serve_half(FAR struct sf32lb52_audio_s *priv,
                                     uint8_t half);
 static void sf32lb52_prime_playback(FAR struct sf32lb52_audio_s *priv);
+static void sf32lb52_complete_worker(FAR void *arg);
 
 /****************************************************************************
  * Private Data
@@ -249,6 +254,17 @@ static uint32_t sf32lb52_serve_half(FAR struct sf32lb52_audio_s *priv,
         {
           memset(stage + n, 0, SF32LB52_AUDIO_STAGE_BYTES - n);
         }
+
+      /* The upper half marks the last buffer of a stream with
+       * AUDIO_APB_FINAL.  The audio just copied still needs a DMA period to
+       * leave the staging area, so arm a countdown rather than signalling
+       * completion from here. */
+
+      if ((apb->flags & AUDIO_APB_FINAL) != 0)
+        {
+          priv->final_drain = 2;
+          _info("playback: final buffer served, draining staging\n");
+        }
     }
 
   if (priv->dev.upper != NULL)
@@ -277,6 +293,28 @@ static void sf32lb52_stage_callback(uint8_t dir, uint8_t half)
       half >= SF32LB52_AUDIO_STAGE_HALVES)
     {
       return;
+    }
+
+  /* End of a playback stream: the buffer carrying AUDIO_APB_FINAL was copied
+   * into a staging half two interrupts ago, so its audio has now left the
+   * staging area and the player is entitled to AUDIO_CALLBACK_COMPLETE -
+   * without it nxplayer stays in PLAYING forever (and, with
+   * CONFIG_DEBUG_FEATURES, trips its own outstanding-buffer assert on the
+   * way out).  stop() suppresses its own COMPLETE once this one is out. */
+
+  if (priv->final_drain > 0 && --priv->final_drain == 0 &&
+      !priv->complete_sent)
+    {
+      if (work_queue(LPWORK, &priv->complete_work, sf32lb52_complete_worker,
+                     priv, 0) >= 0)
+        {
+          priv->complete_sent = true;
+          _info("playback: end of stream, COMPLETE queued\n");
+        }
+      else
+        {
+          _err("playback: work_queue failed, COMPLETE not sent\n");
+        }
     }
 
   sf32lb52_serve_half(priv, half);
@@ -566,8 +604,10 @@ static int sf32lb52_start(FAR struct audio_lowerhalf_s *dev)
       return ret;
     }
 
-  priv->overruns = 0;
-  priv->running  = true;
+  priv->overruns      = 0;
+  priv->final_drain   = 0;
+  priv->complete_sent = false;
+  priv->running       = true;
 
   _info("start: dir=%u\n", priv->dir);
   return OK;
@@ -617,6 +657,8 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
 {
   FAR struct sf32lb52_audio_s *priv =
     (FAR struct sf32lb52_audio_s *)dev;
+  FAR struct ap_buffer_s *apb;
+  dq_queue_t returned;
   irqstate_t flags;
   int ret;
 
@@ -625,24 +667,64 @@ static int sf32lb52_stop(FAR struct audio_lowerhalf_s *dev)
   sf32lb52_audio_hw_stop(priv->dir);
   priv->running = false;
 
-  /* Empty the queue without handing the buffers back through
-   * AUDIO_CALLBACK_DEQUEUE.  The owner is about to exit and releases them
-   * itself via AUDIOIOC_FREEBUFFER; re-delivering them here would just make
-   * it write the tail of the recording out a second time.
+  /* Take the queue apart, then hand the buffers back outside the critical
+   * section - the upper half may block on its message queue.
+   *
+   * Capture: drop them silently.  The owner is about to exit and releases
+   * them itself via AUDIOIOC_FREEBUFFER; re-delivering them would make it
+   * write the tail of the recording out a second time.
+   *
+   * Playback: they must come back (with nbytes = 0).  The player keeps its
+   * own count of buffers it has not seen returned yet and asserts on a
+   * mismatch when COMPLETE arrives, and it is the owner of those buffers
+   * until we give them back.
    */
 
+  dq_init(&returned);
+
   flags = up_irq_save();
-  while (dq_remfirst(&priv->pendq) != NULL)
+  while ((apb = (FAR struct ap_buffer_s *)dq_remfirst(&priv->pendq)) != NULL)
     {
+      dq_addlast(&apb->dq_entry, &returned);
     }
 
   up_irq_restore(flags);
+
+  if (priv->dir == SF32LB52_AUDIO_PLAYBACK)
+    {
+      unsigned int returned_count = 0;
+
+      while ((apb = (FAR struct ap_buffer_s *)dq_remfirst(&returned)) != NULL)
+        {
+          apb->nbytes  = 0;
+          apb->curbyte = 0;
+
+          if (priv->dev.upper != NULL)
+            {
+              priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_DEQUEUE, apb, OK);
+            }
+
+          returned_count++;
+        }
+
+      _info("stop: gave back %u queued playback buffer(s)\n", returned_count);
+    }
 
   /* Tell the upper half the stream has finished draining - but do it from the
    * work queue, not from here.  See sf32lb52_complete_worker() for why a
    * synchronous callback deadlocks the whole board.  -EBUSY simply means one
    * is already pending, which is fine.
+   *
+   * A playback stream that already saw its AUDIO_APB_FINAL buffer complete
+   * got this message from the interrupt path; sending a second one would
+   * only confuse a player that has already left its receive loop.
    */
+
+  if (priv->dir == SF32LB52_AUDIO_PLAYBACK && priv->complete_sent)
+    {
+      _info("stop: done (complete already delivered)\n");
+      return OK;
+    }
 
   ret = work_queue(LPWORK, &priv->complete_work, sf32lb52_complete_worker,
                    priv, 0);

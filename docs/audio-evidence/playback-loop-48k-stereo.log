@@ -1,0 +1,123 @@
+=== 放音实机验证 2026-09-19 22:30:15 ===
+
+[   0.5s] $ uname -a
+uname -a
+NuttX  0.0.0 76354c63-dirty Sep 19 2026 22:09:38 arm nsh
+nsh> [K
+[   1.5s] $ ls /dev
+ls /dev
+/dev:
+ adc0
+ audio0
+ buttons
+ config0
+ console
+ fb0
+ gpio0
+ gpio1
+ gpio2
+ i2c0
+ i2c1
+ lcd0
+ mmcsd0
+ net/
+ null
+ pwm0
+ ram0
+ rtc0
+ spi1
+ timer0
+ ttyACM0
+ ttyS0
+ tun
+ urandom
+ watchdog0
+nsh> [K
+>>> 录音 6 秒：现在对着板子说话/拍手 <<<
+
+[   2.4s] $ nxrecorder
+nxrecorder
+NxRecorder version 1.00
+h for commands, q to exit
+
+nxrecorder> [K
+[   2.7s] $ device /dev/audio0
+device /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+[   2.9s] $ recordraw /data/loop.pcm 2 16 48000 0
+recordraw /data/loop.pcm 2 16 48000 0
+sf32lb52_audio_hw_config_capture: capture config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+sf32lb52_start: start: dir=0
+nxrecorder> [K
+[   9.4s] $ stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+[   9.6s] $ q
+q
+nsh> [K
+[   9.8s] $ ls -l /data
+ls -l /data
+/data:
+ -rwxrwxrwx      589824 loop.pcm
+ drwxrwxrwx           0 tf/
+nsh> [K
+>>> 听喇叭：1 kHz 纯音，2 秒 <<<
+
+[  10.1s] $ nxplayer
+nxplayer
+NxPlayer version 1.05
+h for commands, q to exit
+
+nxplayer> [K
+[  10.3s] $ device /dev/audio0
+device /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxplayer> [K
+[  10.5s] $ tone 48000 2 1000
+tone 48000 2 1000
+sf32lb52_audio_hw_config_playback: playback config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: playback started (staging 16384 B, circular)
+sf32lb52_start: start: dir=1
+nxplayer> [Ksf32lb52_serve_half: playback: final buffer served, draining staging
+sf32lb52_stage_callback: playback: end of stream, COMPLETE queued
+sf32lb52_stop: stop: overruns=3
+sf32lb52_audio_hw_stop: playback stopped
+sf32lb52_stop: stop: gave back 0 queued playback buffer(s)
+sf32lb52_stop: stop: done (complete already delivered)
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+[  12.9s] >>> 纯音从开始到播完：2.4 秒 <<<
+
+>>> 听喇叭：回放刚才录到的那 6 秒 <<<
+
+[  12.9s] $ playraw /data/loop.pcm 2 16 48000 0
+playraw /data/loop.pcm 2 16 48000 0
+sf32lb52_audio_hw_config_playback: playback config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: playback started (staging 16384 B, circular)
+sf32lb52_start: start: dir=1
+nxplayer> [Ksf32lb52_serve_half: playback: final buffer served, draining staging
+sf32lb52_stage_callback: playback: end of stream, COMPLETE queued
+sf32lb52_stop: stop: overruns=3
+sf32lb52_audio_hw_stop: playback stopped
+sf32lb52_stop: stop: gave back 0 queued playback buffer(s)
+sf32lb52_stop: stop: done (complete already delivered)
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+[  16.4s] >>> 回放从开始到播完：3.5 秒；busy=no <<<
+
+[  16.4s] $ q
+q
+nsh> [K
+=== 结束 22:30:31 ===

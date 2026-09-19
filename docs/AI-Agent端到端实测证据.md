@@ -3,6 +3,11 @@
 ## 被测配置
 
 - 固件：ai_agent，`nuttx.bin` 2,229,560 字节，md5 `77bff8fd5312bfa6bb8e7981665d8d9d`
+  （**本文记录的是那一次实测当时的固件**，故 md5 不动。此后固件在音频侧补了
+  `nxplayer` 与放音/采集通道配置修复，**当前随包固件为 2,249,088 字节 / md5
+  `4fa0eade7844f22a55f561bc7723aa91`**，Agent 部分的功能与本文一致。
+  音频侧的新证据见 `docs/audio-evidence/playback-loop-48k-stereo.log` 与
+  `board/sf32lb52_audio/README.md` §7.8。）
 - 通路：**芯片原生 USB（CDC ACM）** —— 板子 `/dev/ttyACM0` ↔ PC `COM9`（VID:PID `38F4:A4A7`）
 - **全程只用一根 USB 线**，未使用 USB-TTL，未接任何排针
 - PC 侧链路：Windows 串口桥 → TCP → WSL socat → pppd → ppp0 → NAT → 外网

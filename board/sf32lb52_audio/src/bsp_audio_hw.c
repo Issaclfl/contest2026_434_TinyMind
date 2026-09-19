@@ -600,6 +600,22 @@ int sf32lb52_audio_hw_config_capture(uint32_t rate, uint8_t nchannels,
       return ret;
     }
 
+  /* Same trap as the playback path below: assigning g_audprc.cfg only stores
+   * the row inside the handle.  Without this call the RX channel keeps its
+   * reset defaults (16-bit *mono*), so a host that asks for stereo silently
+   * gets one channel at half the byte rate - which is exactly what the first
+   * hardware measurement showed (6 s of "48kHz 2ch" landed as 589,824 bytes,
+   * i.e. 48kHz mono), while the 16kHz/1ch case looked correct only because
+   * the default happened to match the request.  SDK reference:
+   * drv_audprc.c:1434 applies the RX row the same way. */
+
+  ret = HAL_AUDPRC_Config_RChanel(&g_audprc, 0, &g_audprc.cfg);
+  if (ret != HAL_OK)
+    {
+      _err("audprc Config_RChanel failed: %d\n", ret);
+      return -EIO;
+    }
+
   _info("capture config: %luHz %uch %ubit\n",
          (unsigned long)rate, nchannels, bpsamp);
   return OK;
@@ -671,6 +687,22 @@ int sf32lb52_audio_hw_config_playback(uint32_t rate, uint8_t nchannels,
   if (ret != OK)
     {
       return ret;
+    }
+
+  /* The handle only *stores* a channel row; the TX_CH0_CFG register is
+   * written by HAL_AUDPRC_Config_TChanel().  Receive_DMA() applies the RX
+   * row for us, which is why capture works without an explicit call here -
+   * Transmit_DMA() applies nothing, so without this the TX channel stays
+   * disabled (AUDPRC_TX_CH0_CFG.ENABLE == 0), the AUDPRC never requests
+   * data and the transmit DMA never advances: no half interrupts, no
+   * DEQUEUE callbacks, playback silently dead.  SDK reference:
+   * drv_audprc.c:1018, the replay configure path calls exactly this. */
+
+  ret = HAL_AUDPRC_Config_TChanel(&g_audprc, 0, &g_audprc.cfg1);
+  if (ret != HAL_OK)
+    {
+      _err("audprc Config_TChanel failed: %d\n", ret);
+      return -EIO;
     }
 
   _info("playback config: %luHz %uch %ubit\n",

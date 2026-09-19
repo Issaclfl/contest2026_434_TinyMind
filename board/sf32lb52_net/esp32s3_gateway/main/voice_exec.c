@@ -30,6 +30,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "espllm.h"
 #include "cmd_exec.h"
@@ -44,6 +45,12 @@ static const char *TAG = "gw_voice";
  * gateway"），只发音频它才 1.6 秒返回；换通用 chat 模型也能用，但它会先
  * 自言自语 7~8 秒才肯转写。 */
 #define ASR_MAX_TOKENS 200
+
+/* 转写单独给一个**更短**的超时（云端聊天那条腿是 45 秒）：说完这句话用户就站在手机
+ * 前面等，等到 45 秒等于挂了。实测云端 ASR 正常 1.6 秒，但忙起来能到 40 秒以上
+ * （2026-09-19 下午就撞上一次 43 秒），那种时候宁可 20 秒后如实回一句失败，
+ * 也不要让页面一直转。 */
+#define ASR_TIMEOUT_MS 20000
 
 /* ---------------------------------------------------------------- 小工具 -- */
 
@@ -143,7 +150,7 @@ static bool asr_transcribe(const char *wav, size_t wav_len, char *out, size_t ou
     esp_http_client_config_t cfg = {
         .url = CONFIG_GATEWAY_CLOUD_URL,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = CONFIG_GATEWAY_CLOUD_TIMEOUT_MS,
+        .timeout_ms = ASR_TIMEOUT_MS,
         .buffer_size = 4096,
     };
     esp_http_client_handle_t c = esp_http_client_init(&cfg);
@@ -160,6 +167,7 @@ static bool asr_transcribe(const char *wav, size_t wav_len, char *out, size_t ou
     esp_http_client_set_header(c, "Authorization", auth);
     esp_http_client_set_post_field(c, body, n);
 
+    int64_t t_asr = esp_timer_get_time();
     size_t got = 0;
     int status = 0;
     esp_err_t err = esp_http_client_open(c, n);
@@ -190,6 +198,8 @@ static bool asr_transcribe(const char *wav, size_t wav_len, char *out, size_t ou
         snprintf(out, out_size, "asr failed (HTTP %d)", status);
         return false;
     }
+    ESP_LOGI(TAG, "asr leg: %u B up, %.1f s (HTTP %d)",
+             (unsigned)wav_len, (esp_timer_get_time() - t_asr) / 1e6, status);
     if (!espllm_json_field(resp, "content", out, out_size)) {
         ESP_LOGW(TAG, "asr answered without content: %.160s", resp);
         free(resp);

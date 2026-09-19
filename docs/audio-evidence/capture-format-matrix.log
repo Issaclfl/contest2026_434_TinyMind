@@ -1,0 +1,115 @@
+=== 采集格式验证 2026-09-19 22:32:55 ===
+
+>>> 录音 4 秒：2ch 16bit 48000Hz <<<
+
+[   0.6s] $ nxrecorder
+[0m[33mWARN: LSM6DS3 not found at 0x6a on I2C1: -5
+[0m[0m[31mERROR: LSM6DS3 register failed on I2C1: -5
+[0m[0m[31mERROR: sf32lb52_lsm6ds3_initialize failed: -5
+[0m[0m[33mWARN: skip HAL_FLASH_Init during XIP bringup, NOR write/erase disabled
+[0m[0mINFO: NOR MTD registered at /dev/config0 (offset=2464 blocks=1024)
+[0m
+NuttShell (NSH)
+nsh> [Knxrecorder
+NxRecorder version 1.00
+h for commands, q to exit
+
+nxrecorder> [K
+[   2.8s] $ device /dev/audio0
+device /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+[   3.1s] $ recordraw /data/st48.pcm 2 16 48000 0
+recordraw /data/st48.pcm 2 16 48000 0
+sf32lb52_audio_hw_config_capture: capture config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+sf32lb52_start: start: dir=0
+nxrecorder> [K
+[   7.6s] $ stop
+[0m[31mERROR: ft6146_touch_initialize failed: -5
+[0mstop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+[   7.9s] $ q
+q
+nsh> [K
+[   8.1s] $ ls -l /data/st48.pcm
+ls -l /data/st48.pcm
+ -rwxrwxrwx      802816 /data/st48.pcm
+nsh> [K[   8.3s] 文件 /data/st48.pcm = 802816 字节；录音墙钟 4.7 秒；实测字节率 169455 B/s（期望 192000）
+
+>>> 录音 4 秒：1ch 16bit 16000Hz <<<
+
+[   8.3s] $ nxrecorder
+nxrecorder
+NxRecorder version 1.00
+h for commands, q to exit
+
+nxrecorder> [K
+[   8.6s] $ device /dev/audio0
+device /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+[   8.8s] $ recordraw /data/mo16.pcm 1 16 16000 0
+recordraw /data/mo16.pcm 1 16 16000 0
+sf32lb52_audio_hw_config_capture: capture config: 16000Hz 1ch 16bit
+sf32lb52_configure: configure: rate=16000 ch=1 bits=16
+sf32lb52_audio_hw_start: capture started (staging 16384 B, circular)
+sf32lb52_start: start: dir=0
+nxrecorder> [K
+[  13.2s] $ stop
+stop
+sf32lb52_stop: stop: overruns=0
+sf32lb52_audio_hw_stop: capture stopped
+sf32lb52_stop: stop: done
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxrecorder> [K
+[  13.5s] $ q
+q
+nsh> [K
+[  13.7s] $ ls -l /data/mo16.pcm
+ls -l /data/mo16.pcm
+ -rwxrwxrwx      131072 /data/mo16.pcm
+nsh> [K[  13.9s] 文件 /data/mo16.pcm = 131072 字节；录音墙钟 4.7 秒；实测字节率 27824 B/s（期望 32000）
+
+>>> 放音：48k/2ch 录到的那段（4 秒）<<<
+
+[  13.9s] $ nxplayer
+nxplayer
+NxPlayer version 1.05
+h for commands, q to exit
+
+nxplayer> [K
+[  14.2s] $ device /dev/audio0
+device /dev/audio0
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+nxplayer> [K
+[  14.4s] $ playraw /data/st48.pcm 2 16 48000 0
+playraw /data/st48.pcm 2 16 48000 0
+sf32lb52_audio_hw_config_playback: playback config: 48000Hz 2ch 16bit
+sf32lb52_configure: configure: rate=48000 ch=2 bits=16
+sf32lb52_audio_hw_start: playback started (staging 16384 B, circular)
+sf32lb52_start: start: dir=1
+nxplayer> [Ksf32lb52_serve_half: playback: final buffer served, draining staging
+sf32lb52_stage_callback: playback: end of stream, COMPLETE queued
+sf32lb52_stop: stop: overruns=3
+sf32lb52_audio_hw_stop: playback stopped
+sf32lb52_stop: stop: gave back 0 queued playback buffer(s)
+sf32lb52_stop: stop: done (complete already delivered)
+sf32lb52_shutdown: shutdown
+sf32lb52_shutdown: shutdown: done
+[  19.0s] 回放 4 秒立体声耗时 4.6 秒；busy=no
+
+[  19.0s] $ q
+q
+nsh> [K
+=== 结束 22:33:14 ===

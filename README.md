@@ -116,8 +116,8 @@ Agent [netmgr] Network connected: 10.0.0.2
 
 | 项目 | 结果 |
 |---|---|
-| 构建产物 | `nuttx.bin` **2,229,560 字节**，md5 `77bff8fd5312bfa6bb8e7981665d8d9d` |
-| 资源占用 | flash 13.03%（16 MB）／ sram 29.24%（512 KB）／ PSRAM 已在堆内 |
+| 构建产物 | `nuttx.bin` **2,249,088 字节**，md5 `4fa0eade7844f22a55f561bc7723aa91` （含 `nxplayer` 与放音/采集通道配置修复，见 `board/sf32lb52_audio/README.md` §7.8） |
+| 资源占用 | flash 13.40%（16 MB）／ sram ≈ 29.3%（512 KB）／ PSRAM 已在堆内 |
 | 运行期内存 | `free` 报 Umem 总量 **8.7 MB**（512 KB SRAM + 8 MB PSRAM，`CONFIG_MM_REGIONS=2`） |
 | 板子实跑 | `ai_agent` 启动完成，**36 个工具**注册、Skills 装载、`set_llm` 写入成功 |
 | 注册为 NSH 内置命令 | `{ "ai_agent", 100, 32768, ai_agent_main }`，栈 32 KB |
@@ -139,8 +139,10 @@ Agent [netmgr] Network connected: 10.0.0.2
 
 ### 诚实说明
 
-- **放音出声尚未实测**：驱动侧放音链路已实现并通过编译与符号验证，但因缺 4Ω 喇叭未做
-  实机出声测试。技术报告 3.5.4 与 3.7.3 有完整记录。
+- **放音已实测跑通，听感待确认**：接上 4Ω/3W 喇叭后，`nxplayer` 的纯音与 `playraw`
+  回放**都能自然播完并自动结束会话**（驱动按 `AUDIO_APB_FINAL` 交 `COMPLETE`），采集
+  侧随之补齐了通道配置。数字通路有完整串口日志（`docs/audio-evidence/playback-loop-48k-stereo.log`），
+  **"喇叭里到底听到了什么"需要人耳确认**，本仓不替它下结论。技术报告 3.5.4 / 3.7.3 有完整记录。
 - **语音通道（第 3 层之上的"对话"）未完成，且已查清为什么**：Agent 的默认语音后端走
   Vela 媒体框架（`media_recorder`），而该框架建在 FFmpeg + PFW 插件之上
   （`frameworks/multimedia/media/`），`CONFIG_MEDIA` 依赖 `LIB_FFMPEG`——在 armv8-m 上
