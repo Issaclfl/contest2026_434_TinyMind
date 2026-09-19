@@ -119,6 +119,9 @@ void app_main(void)
          * cloud nor this decision. */
         cmd_exec_init();
         voice_start();
+        /* 同一组路由再开一份 TLS：手机浏览器只在安全上下文里给麦克风，
+         * http 页面上"按住说话"是点不动的（见 voice_exec.c 顶部）。 */
+        voice_https_start();
         net_cloud_start();
     }
 #else

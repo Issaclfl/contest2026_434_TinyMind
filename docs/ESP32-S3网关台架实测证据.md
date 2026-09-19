@@ -374,7 +374,7 @@ is a compact integrated circuit..."），账本回 `cloud ok`。
 - **两个真实故障被实测逮住并修复**：body 截断（上面）与 AMPDU 打印饿死 PPP
   （§七）。这类缺陷编译期全不可见。
 
-### 两个操作层面的坑（值得写下来）
+### 三个操作层面的坑（值得写下来）
 
 1. **板子会把相同问题缓存**：连问两次同一句话，第二次 `latency=0ms` 直接返回
    缓存答案，压根不发请求。演示时**每轮换一个新问法**，否则看到的是缓存而不是
@@ -384,6 +384,15 @@ is a compact integrated circuit..."），账本回 `cloud ok`。
    别把它当成"固件崩溃"。相应地，复位后板子的 `ppp0` 可能变"僵尸"（还挂着旧
    地址但没有会话），修法是板上 `kill` 掉 pppd 再 `pppd /dev/ttyS0 460800 &`，
    或让 S3 完整复位一次重新协商。
+3. **在板子上退出 agent（`vela>` 里敲 `quit`）之后，那块板子的控制台就死了**——这是
+   2026-09-19 实测到的，不是在讲道理：`quit` 打完 `Exiting agent... [cli] CLI thread
+   exiting` 之后，回车、`ifconfig`、`help` 全部无回显（连提示符都没有），8 秒长监听
+   零字节；软件侧试过 RTS/DTR 的各种极性组合与关开端口，都叫不回来。这类彻底静默
+   和文档里记过的"断言 `while(1)` 静默死循环"是同一个观感：**没有日志、没有复位**。
+   恢复方式只有物理动作——按板载 Reset 或拔插 USB。
+   **所以重拨 pppd 不要走 `quit`**：板子断电重启 → 到 `nsh>` → `pppd /dev/ttyS0 460800 &`
+   → `ai_agent`。（本次会话里板子就停在这个状态等用户复位，S3 侧的验证不受影响——
+   语音与命令那条链路根本不经过板子。）
 
 ### 补记：云端模型名不是常量，而这次排查正好验证了降级链路
 
@@ -649,6 +658,65 @@ S3 侧日志（开机与执行）：
    menuconfig 里可改；灯没有回读，所以 `result:"led set"` 只表示**写成功了**，
    是否真的亮着要人看。固件初始化时会打印用的是哪个 GPIO。
 
+### 10.6 第二批动作：读传感器、取网络数据、转云端问答（2026-09-19）
+
+前四类动作（灯/扫描/ping/状态）都只在这块板子上干活。这一批要说明的是**它不止会点灯**，
+而且三类"活"的边界是清楚的：
+
+| 口令 | 动作 | 谁干活 | 实测 |
+|---|---|---|---|
+| blink the blue light 3 times | `{"action":"led","color":"blue","effect":"blink","times":3}` | RMT 闪灯（闪完停在亮着） | 3.3 s |
+| make the green light breathe | `{"action":"led","color":"green","effect":"breath"}` | 呼吸一轮约 2 秒 | 4.0 s |
+| what is the chip temperature | `{"action":"temperature"}` | **片内温度传感器**（真读数） | 1.4 s，48.3 °C |
+| what time is it | `{"action":"time"}` | SNTP；拿不到就退回云端响应的 `Date` 头 | 1.4 s，2026-09-19 13:27:01（UTC+8） |
+| what is the weather in shanghai | `{"action":"weather","city":"shanghai"}` | **wttr.in 的真实数据**（免 key，八城闭集） | 3.5 s，`Shanghai: 🌦️  +30°C` |
+| tell me a joke | `{"action":"ask"}` | 本地小模型只判断"该问云端"，原话转给 mimo | 9.4~9.9 s |
+
+语音那条腿同样走通（都是 16 kHz 合成音打 `/voice`）：`What is the chip temperature?`
+→ 4.0 s → 47.3 °C；`Tell me a joke.` → 9.4 s → 云端给的笑话，emoji 完整。
+
+**数据集与分数**（同一个 0.26M 模型，动作空间从 4 类扩到 10 类、47 个不同 JSON 串）：
+
+| | 第一批（4 类） | 第二批（10 类） |
+|---|---|---|
+| 训练 / 留出 | 330 / 46 | 945 / 102 |
+| 留出集 | 43/46 = 93.5%（整族留出） | **89/102 = 87.3%** |
+| 训练集 | 330/330 | **945/945 = 100%** |
+
+留出方式要说清楚：第一批是**整族留出**（`bare`/`switch` 两族一句都不给模型）；这批新增
+的动作一族只有一种活，没法整族留出，所以留的是**每组最后一个说法**——这比整族留出弱一
+档。错的 13 条里有 5 条是同一个：`fade the X light in and out`（我造的怪说法，模型认不出
+是呼吸，退化成常亮）；其余零散错在 bare 族的 `off` / `green light on`、口语的
+`what o clock is it`、`how warm is the chip running`。
+
+**这一批量产里逮到并修掉的五个真问题**（每个都在对应文件里留了注释）：
+
+1. **`espllm_json_field()` 只认字符串值**，而 `"times":3` 是数字 → 闪灯永远只闪一下，
+   而且不报错。加了 `json_int_field()` 自己扫数字。
+2. **云端用代理对（CESU-8）发 emoji**：🐔 的字节是 `ED A0 BD ED B0 94`——单个 3 字节
+   序列看着合法、整体却是非法 UTF-8，浏览器那侧 `json.load` 直接报
+   `invalid continuation byte`。修法是 `espllm_utf8_sanitize()`：成对的代理还原成 4 字节
+   UTF-8（emoji 留住），落单的丢掉。
+3. **`esp_http_client_get_header()` 读不到响应头**（它只认自己 `set` 过的请求头），
+   所以"用 Date 头对时"这条腿一开始是坏的、静默返回 -1。改用 `HTTP_EVENT_ON_HEADER`
+   事件接响应头。
+4. **手机热点不回 UDP 123**：SNTP 等不到答案（IDF 默认还有最多 5 秒的启动延迟，已在
+   `sdkconfig.defaults` 里关掉）。所以时间动作是"SNTP 只等 1.5 秒 → 立刻退回 Date 头"，
+   第一次等不到就不再等 SNTP。
+5. **ASR 把数字转写成词而不是数字**（实测 `blink the blue light three times` 是逐字
+   转写），而第一批只训了 `3 times` → **语音说这句会翻车**（打字没这个问题，真机上才
+   暴露）。补了词形（two/three/four/five times）重训后，语音与打字两条路都对。
+
+**边界（诚实）**：
+- `ask` 需要联网 + key：没有上行时它如实回 `no uplink -- answering a question needs the
+  internet`，不编答案；延迟 9~10 秒，因为云端那个模型是思考型，要先"想"。
+- `time` / `weather` 同样依赖外网；`weather` 用的是第三方免 key 服务（wttr.in），
+  它慢或挂掉时动作会如实把 HTTP 状态报出来。
+- 时区写死 UTC+8（这块板子只服务一个时区）。
+- 动作空间涨到 47 个 JSON 串之后，同一个 0.26M 模型的留出集从 93.5% 掉到 87.3%——
+  **容量是真的有限**。再往上加动作，要么继续扩说法重训（5~12 分钟），要么换更大的
+  底座。这个取舍摆在这里，不藏。
+
 ## 十一、语音：说一句就控制（云听、端选）
 
 ### 11.1 分工，以及它是怎么定下来的
@@ -687,13 +755,75 @@ JSON 还没轮到输出（日志里能看到它反复念我给的提示词）。
 
 ### 11.4 入口：一个手机能打开的页面
 
-网关现在在 `GET /talk` 提供一个**按住说话**的页面（浏览器 `getUserMedia` 录音 →
+网关在 `GET /talk` 提供一个**按住说话**的页面（浏览器 `getUserMedia` 录音 →
 在 JS 里降到 16 kHz 单声道、封成 WAV → `POST /voice`）。手机或电脑连同一个热点，
-打开 `http://<网关地址>/talk` 就能用。
+打开页面就能用。
 
 **这条腿的边界写清楚**：音频输入用的是浏览器（手机/电脑的麦克风），不是板子的
 麦克风——板子的采集通路单独验证过（48 kHz 立体声、零丢包，见音频证据），把这
 两段接起来是下一步的事。另外**语音这条腿需要联网**（听在云端）；断网时打字的口令
 仍然可用，那条路完全是本地的。
 
-（页面里的 JS 做过语法检查；真机浏览器上的完整交互待用户实测。）
+#### 11.4.1 第一版在手机上"按了没反应"——浏览器不给 http 页面麦克风
+
+第一版页面只有一条腿：按住 → `getUserMedia` → 上传。用户实测：页面能打开，
+**按钮按下去毫无反应**。
+
+在同一台机器上用真浏览器复现（Chrome，`10.138.138.122/talk`）：
+
+| 探测 | 结果 |
+|---|---|
+| `window.isSecureContext` | **false** |
+| `typeof navigator.mediaDevices` | **`"undefined"`** |
+| `location.protocol` | `http:` |
+
+点按钮时控制台抓到的两条 Promise 拒绝：
+
+```
+rejection: Cannot read properties of undefined (reading 'getUserMedia')
+rejection: Cannot read properties of undefined (reading 'disconnect')
+```
+
+——不是本地代码的 bug，是**浏览器只把 getUserMedia 给安全上下文**（https 或
+localhost）。http 页面上 `navigator.mediaDevices` 这个对象根本不存在，于是按钮点下去
+什么都不会发生（第一版也没有 try/catch，失败是静默的）。第二条拒绝是同一个坑的另一面：
+没拿到 stream 时 `stop()` 仍会去 `disconnect`，所以"按一下"还会再抛一次。
+
+#### 11.4.2 修法：同一组路由再开一个 TLS 口，页面改成三条腿
+
+1. **TLS 口**：`espllm_http_start_secure()`（组件里用 `esp_https_server`）把**同一组路由**
+   在 443 上再注册一遍，`/talk` 与 `/voice` 都在。板上 Agent 仍走明文那条腿
+   （`http://10.0.0.1/v1`），两个口并存——板子的 NuttX 客户端不做 TLS，这条路不能动。
+   证书是**自签**的：手机第一次打开会问一次，点"继续前往"即可（见网关 README 里
+   "自签证书"一节，那里也写了它不是秘密、以及怎么重新生成）。
+2. **页面按 `isSecureContext` 自己选腿**：
+   - https 页：按住说话（`getUserMedia`）；
+   - 传一段录音文件（`decodeAudioData` 解码后同样降到 16 kHz，手机录音机的 m4a 一般能解）；
+   - 直接打字（POST `/v1/chat/completions` + `model: cmd`，这条**完全本地、断网可用**）。
+
+   http 页面把"按住说话"置灰并**把原因写在页面上**，同时给出 https 链接——不装作能用。
+3. 顺手修掉三个会咬人的地方：`stop()` 在没 stream 时的二次异常；按得太快（松开早于
+   `getUserMedia` 返回）时的脏状态；`createScriptProcessor` 的输出接到扬声器会啸叫
+   （接一个 gain=0）；`pointercancel` 兜住手指滑出按钮的情况。
+4. **第一次按必然弹权限框**——用户不可能一边按住按钮一边去点"允许"，所以那一按什么
+   都录不到。改成：拿到流之后**不释放**（松开只停录音，`pagehide` 才停轨道），第二按
+   起就是即时的；文案也照着改（"如果刚才弹了授权框，先点允许，再重新按住一次"）。
+   实测：第二按 400 ms 内进入"录音中"，且 `getUserMedia` 全程只被调用过一次。
+
+#### 11.4.3 重新验证（不需要真实麦克风的部分全部验过）
+
+| 环节 | 怎么验的 | 结果 |
+|---|---|---|
+| 页面 JS 语法 | `tools/check_voice_page.py`：把 C 字符串按编译器的方式解开（**并跳过 C 注释**——注释里的引号曾被当成字符串拼进 JS，这个坑把工具自己也教育了一顿），交给 `node --check` | 通过；抽出的页面与设备实际发出的 **7541 B 逐字节一致** |
+| TLS 口 | 设备日志 + `curl -k https://10.138.138.122/talk` | `Server listening on port 443`，HTTP 200，页面与明文口同一份 |
+| 连按两次（模拟"第一次弹权限框"之后的第二次） | 第二按后 400 ms 读页面状态 | 进入"录音中…"，且 `getUserMedia` 调用次数仍为 **1**（流被复用，不再有权限往返） |
+| 打字口令（浏览器真敲） | 页面上输入 `turn on the white light` 点发送 | 1022 ms，`{"action":"led","color":"white","result":"led set"}` |
+| 语音走 TLS 口 | 16 kHz 合成音 `turn on the blue light` 打 `https://…/voice` | 3.99 s，`{"transcript":"Turn on the blue light.","ok":true,…"color":"blue"}` |
+| 语音走明文口（http 页面传文件那条路） | `switch the green light on` 打明文 `/voice` | 3.70 s，`{"action":"led","color":"green"}` |
+| **按住说话的录音链路** | 本机没有麦克风、受控浏览器又点不过自签证书：用 `Object.defineProperty` 顶替 `isSecureContext` 与 `navigator.mediaDevices`，拿 440 Hz 振荡器当音源（48 kHz），走完 按住→编码→上传→渲染 | 页面切到"麦克风可用"分支；2.3 s 后设备回 `{"error":"the recording held no speech (silence or a tone)"}`——链路通，内容是纯音 |
+| **真实麦克风** | 需要一台能点过自签证书的浏览器（手机） | **待用户实测**——这是唯一没验的一环 |
+
+最后那一条测试还顺手暴露一个粗糙处：转写成功但内容是空的（静音/纯音）时，原来的代码
+会返回 `{"error":""}`。现在改成 `the recording held no speech (silence or a tone)`，
+把"听清了但没听到话"和"识别失败"分开说。
+

@@ -79,3 +79,21 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 # dialling then fails with "peer asked to close".  PPP over UART carries at
 # most 460800 baud, so AMPDU receive buys nothing here: turn it off.
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+
+# ---- TLS for the voice page ------------------------------------------------
+# A browser hands out the microphone only to a *secure* origin: on
+# http://<gateway>/talk, window.isSecureContext is false and
+# navigator.mediaDevices is undefined, so the hold-to-talk button does nothing
+# (measured in Chrome, see docs/ESP32-S3网关台架实测证据.md).  The same routes
+# are therefore served a second time over TLS, with a self-signed certificate
+# embedded from main/*.pem -- details and the regeneration command are in
+# README.md.  The board's agent keeps using the plain-HTTP leg.
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+
+# ---- time ----------------------------------------------------------------
+# The command model has a `time` action.  With the startup delay on (the
+# default), lwIP holds the first NTP request for up to 5 s -- measured on a
+# phone hotspot, where it also turned out UDP 123 gets no answer at all, so
+# cmd_exec.c falls back to the Date header of an HTTPS response.  Removing the
+# delay is still right: it costs nothing and gives SNTP a fair chance.
+CONFIG_LWIP_SNTP_STARTUP_DELAY=n

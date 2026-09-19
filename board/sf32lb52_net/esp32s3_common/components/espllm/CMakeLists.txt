@@ -13,6 +13,7 @@ idf_component_register(
         "include"
     PRIV_REQUIRES
         esp_http_server
+        esp_https_server   # GET /talk 的 TLS 监听口（浏览器只在安全上下文里给麦克风）
         esp_partition
         esp_timer
         heap

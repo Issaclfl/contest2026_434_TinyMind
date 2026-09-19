@@ -216,6 +216,50 @@ static char *rewrite_model(const char *body, size_t body_len, size_t *out_len)
     return out;
 }
 
+/* 一次 POST：body 进，响应攒进 acc。返回 HTTP 状态码，-1 表示压根没连上。 */
+static int cloud_post(const char *body, size_t body_len, resp_accum_t *acc)
+{
+    esp_http_client_config_t cfg = {
+        .url = CONFIG_GATEWAY_CLOUD_URL,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = CLOUD_TIMEOUT_MS,
+        .event_handler = on_http_event,
+        .user_data = acc,
+        .buffer_size = 4096,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .keep_alive_enable = false,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        return -1;
+    }
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_header(client, "Authorization", "Bearer " CONFIG_GATEWAY_CLOUD_API_KEY);
+    esp_http_client_set_post_field(client, body, (int)body_len);
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cloud call failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+    return status;
+}
+
+static bool accum_init(resp_accum_t *acc)
+{
+    acc->cap = 4096;
+    acc->len = 0;
+    acc->overflow = false;
+    acc->buf = heap_caps_malloc(acc->cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (acc->buf != NULL) {
+        acc->buf[0] = '\0';
+    }
+    return acc->buf != NULL;
+}
+
 static bool cloud_ask(const char *body, size_t body_len, char **response)
 {
     size_t out_len = body_len;
@@ -225,43 +269,17 @@ static bool cloud_ask(const char *body, size_t body_len, char **response)
     }
 
     resp_accum_t acc = { 0 };
-    acc.cap = 4096;
-    acc.buf = heap_caps_malloc(acc.cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (acc.buf == NULL) {
+    if (!accum_init(&acc)) {
         free(out_body);
         return false;
     }
-    acc.buf[0] = '\0';
 
-    esp_http_client_config_t cfg = {
-        .url = CONFIG_GATEWAY_CLOUD_URL,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = CLOUD_TIMEOUT_MS,
-        .event_handler = on_http_event,
-        .user_data = &acc,
-        .buffer_size = 4096,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .keep_alive_enable = false,
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (client == NULL) {
-        free(acc.buf);
-        free(out_body);
-        return false;
-    }
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_header(client, "Authorization", "Bearer " CONFIG_GATEWAY_CLOUD_API_KEY);
-    esp_http_client_set_post_field(client, out_body, (int)out_len);
-
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
+    int status = cloud_post(out_body, out_len, &acc);
     free(out_body);
 
     bool ok = false;
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "cloud call failed: %s", esp_err_to_name(err));
+    if (status < 0) {
+        /* already logged by cloud_post */
     } else if (status != 200) {
         /* The cloud's error text is the fastest way to see what it disliked
          * about the request; it is a diagnostics message, not user content. */
@@ -432,6 +450,119 @@ static void note_prompt(const char *body)
         content[n] = '\0';
         strlcpy(s_last_prompt, content, sizeof(s_last_prompt));
     }
+}
+
+/* ------------------------------------------------- 一句问答（ask 动作）------ */
+
+/* JSON 字符串转义：够用就行（引号、反斜杠、控制字符）。 */
+static size_t json_escape(const char *src, char *dst, size_t cap)
+{
+    size_t o = 0;
+    for (const char *p = src; *p != '\0' && o + 8 < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+        } else if (c == '\n') {
+            dst[o++] = '\\';
+            dst[o++] = 'n';
+        } else if (c == '\r') {
+            dst[o++] = '\\';
+            dst[o++] = 'r';
+        } else if (c == '\t') {
+            dst[o++] = '\\';
+            dst[o++] = 't';
+        } else if (c < 0x20) {
+            o += (size_t)snprintf(dst + o, cap - o, "\\u%04x", c);
+        } else {
+            dst[o++] = (char)c;
+        }
+    }
+    dst[o] = '\0';
+    return o;
+}
+
+/* 700 而不是 200：mimo 是思考型模型，token 给少了它把额度全花在"想"上，正文是空的
+ * （实测过，见证据文档 §八的补记）。 */
+#define ASK_MAX_TOKENS 700
+
+int net_cloud_ask_text(const char *text, char *out, size_t out_size)
+{
+    if (text == NULL || text[0] == '\0') {
+        snprintf(out, out_size, "nothing to ask");
+        return -1;
+    }
+    if (!net_cloud_configured()) {
+        snprintf(out, out_size, "no cloud key on this gateway (tools/set_cloud.py)");
+        return -1;
+    }
+    if (!uplink_ready()) {
+        snprintf(out, out_size, "no uplink -- answering a question needs the internet");
+        return -1;
+    }
+
+    size_t esc_cap = strlen(text) * 6 + 16;
+    char *esc = heap_caps_malloc(esc_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (esc == NULL) {
+        snprintf(out, out_size, "out of memory");
+        return -1;
+    }
+    (void)json_escape(text, esc, esc_cap);
+
+    size_t body_cap = strlen(esc) + 256;
+    char *body = heap_caps_malloc(body_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        free(esc);
+        snprintf(out, out_size, "out of memory");
+        return -1;
+    }
+    int n = snprintf(body, body_cap,
+                     "{\"model\":\"%s\",\"max_tokens\":%d,\"messages\":"
+                     "[{\"role\":\"user\",\"content\":\"%s\"}]}",
+                     CONFIG_GATEWAY_CLOUD_MODEL, ASK_MAX_TOKENS, esc);
+    free(esc);
+    if (n <= 0 || (size_t)n >= body_cap) {
+        free(body);
+        snprintf(out, out_size, "that question is too long");
+        return -1;
+    }
+
+    resp_accum_t acc = { 0 };
+    if (!accum_init(&acc)) {
+        free(body);
+        snprintf(out, out_size, "out of memory");
+        return -1;
+    }
+    int status = cloud_post(body, (size_t)n, &acc);
+    free(body);
+
+    if (status < 0) {
+        free(acc.buf);
+        snprintf(out, out_size, "could not reach the cloud");
+        return -1;
+    }
+    if (status != 200) {
+        ESP_LOGW(TAG, "ask: HTTP %d: %.160s", status, acc.buf != NULL ? acc.buf : "(no body)");
+        free(acc.buf);
+        snprintf(out, out_size, "cloud answered HTTP %d", status);
+        return -1;
+    }
+    /* 取**最后**一个 content：思考型模型的回答正文在 reasoning_content 之后，
+     * 而 reasoning_content 里的正文也可能出现同名字样（内部只有全文扫描）。 */
+    bool got = espllm_json_field_last(acc.buf, "content", out, out_size);
+    size_t len = got ? strlen(out) : 0;
+    free(acc.buf);
+    if (!got) {
+        snprintf(out, out_size, "cloud answered without content");
+        return -1;
+    }
+    if (len == 0) {
+        snprintf(out, out_size,
+                 "the cloud only reasoned and never answered (max_tokens too small?)");
+        return -1;
+    }
+    ESP_LOGI(TAG, "ask: %u chars back", (unsigned)len);
+    return 0;
 }
 
 void net_cloud_start(void)

@@ -94,6 +94,14 @@ bool espllm_json_field(const char *json, const char *key, char *out, size_t out_
  * The command route needs exactly that one. */
 bool espllm_json_field_last(const char *json, const char *key, char *out, size_t out_size);
 
+/* 把不合法的 UTF-8 序列删掉，原地整理（长度只会变短）。
+ *
+ * 为什么需要：从云端拿回来的文本**可能在 max_tokens 处被截断，正好切在一个多字节
+ * 字符中间**（实测：一句英文回答后面的 emoji 被砍成半个），那样拼进 JSON 就是非法
+ * UTF-8，浏览器直接解不出来（python json.load 报 "invalid continuation byte"）。
+ * 与其在好几个地方各自转义，不如在拿回来的地方统一清一遍。 */
+void espllm_utf8_sanitize(char *s);
+
 /* OpenAI-compatible endpoints on `port`:
  *     GET  /                     dashboard (browser friendly, auto-refresh)
  *     GET  /status               the same information as plain text
@@ -102,3 +110,16 @@ bool espllm_json_field_last(const char *json, const char *key, char *out, size_t
  * Reachable on every interface that has an address, so the board can point its
  * agent's set_llm at http://10.0.0.1/v1 once the PPP link is up. */
 esp_err_t espllm_http_start(uint16_t port);
+
+/* 同一组路由再开一个 TLS 监听口，只是套了 TLS。
+ *
+ * 为什么需要：**浏览器只在安全上下文里给麦克风**。http://<ip>/talk 送出的页面里
+ * navigator.mediaDevices 直接是 undefined（桌面 Chrome 与手机浏览器一致，实测
+ * isSecureContext=false → 按钮点了没反应，控制台只有一句 "Cannot read properties
+ * of undefined"）。板上 Agent 走的是明文那条腿（http://10.0.0.1/v1），所以两个口
+ * 并存：明文给板子，TLS 给浏览器。
+ *
+ * cert/key 是 PEM 文本（app 侧嵌入）。长度按 _binary_..._end - _start 传，含结尾
+ * 的 NUL —— esp_https_server 自己的惯例。 */
+esp_err_t espllm_http_start_secure(uint16_t port, const uint8_t *cert, size_t cert_len,
+                                   const uint8_t *key, size_t key_len);

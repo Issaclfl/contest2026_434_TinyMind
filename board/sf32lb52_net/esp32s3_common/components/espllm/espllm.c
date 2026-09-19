@@ -150,3 +150,64 @@ void espllm_set_temperature(float temperature)
     }
     llm_engine_set_temperature(temperature);
 }
+
+void espllm_utf8_sanitize(char *s)
+{
+    if (s == NULL) {
+        return;
+    }
+    unsigned char *p = (unsigned char *)s;
+    unsigned char *o = (unsigned char *)s;
+    while (*p != '\0') {
+        int n = 0;
+        if (*p < 0x80) {
+            n = 1;
+        } else if ((*p & 0xE0) == 0xC0) {
+            n = 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            n = 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            n = 4;
+        }
+        /* n == 0：孤立的延续字节（0x80..0xBF）或非法首字节，丢掉。 */
+        bool good = n > 0;
+        for (int i = 1; good && i < n; i++) {
+            good = (p[i] & 0xC0) == 0x80;   /* p[i] 是 NUL 时这里自然为假 */
+        }
+        if (!good) {
+            p++;
+            continue;
+        }
+
+        /* 3 字节且落在 ED A0..BF：这是**代理对**，不是合法 UTF-8。
+         * 实测云端就是这么发 emoji 的（🐔 发成 ED A0 BD ED B0 94，CESU-8），
+         * 而浏览器那侧的 json 解析会直接报 "invalid continuation byte"。
+         * 成对的还原成 4 字节 UTF-8（emoji 能留住），落单的丢掉。 */
+        if (n == 3 && (p[0] & 0xF0) == 0xE0 && p[0] == 0xED && p[1] >= 0xA0 && p[1] <= 0xBF) {
+            unsigned cp1 = ((unsigned)(p[0] & 0x0F) << 12) |
+                           ((unsigned)(p[1] & 0x3F) << 6) | (unsigned)(p[2] & 0x3F);
+            if (cp1 >= 0xD800 && cp1 <= 0xDBFF &&
+                p[3] == 0xED && p[4] >= 0xB0 && p[4] <= 0xBF && (p[5] & 0xC0) == 0x80) {
+                unsigned cp2 = ((unsigned)(p[3] & 0x0F) << 12) |
+                               ((unsigned)(p[4] & 0x3F) << 6) | (unsigned)(p[5] & 0x3F);
+                if (cp2 >= 0xDC00 && cp2 <= 0xDFFF) {
+                    unsigned cp = 0x10000u + ((cp1 - 0xD800u) << 10) + (cp2 - 0xDC00u);
+                    *o++ = (unsigned char)(0xF0 | (cp >> 18));
+                    *o++ = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+                    *o++ = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+                    *o++ = (unsigned char)(0x80 | (cp & 0x3F));
+                    p += 6;
+                    continue;
+                }
+            }
+            p += 3;                        /* 落单的代理：丢掉 */
+            continue;
+        }
+
+        for (int i = 0; i < n; i++) {
+            *o++ = p[i];
+        }
+        p += n;
+    }
+    *o = '\0';
+}

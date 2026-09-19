@@ -38,6 +38,16 @@ bool net_cloud_configured(void);
  * 模型信息后的那段同源。返回写入字节数。命令模型的 status 动作用它作答。 */
 int net_cloud_status(char *out, size_t out_size);
 
+/**
+ * 把一句话当成一个 user 消息问云端模型，回答正文写进 out。返回 0 成功，-1 失败
+ * （out 里写的是给人看的失败原因）。
+ *
+ * 命令模型的 `ask` 动作用它：本地 0.26M 的小模型只负责判断"这题该去问云端"，
+ * 原话由这里原样转出去（复述文本正是小模型最不擅长的活，所以不让它复述）。
+ * 没有上行或没有 key 时如实返回失败，不编一个答案出来。
+ */
+int net_cloud_ask_text(const char *text, char *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif

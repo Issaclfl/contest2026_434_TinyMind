@@ -93,6 +93,57 @@ FAMILIES = {
 # 留出整族：模型没见过这几种说法，测的是泛化
 HELD_OUT = {"bare", "switch"}
 
+# ---- 第二批动作（2026-09-19）：读传感器、取网络数据、转云端问答 ---------------
+# 这些动作族的说法**没法整族留出**（一族就一种活），所以留出的粒度是"每组最后一个
+# 说法"：训练集里见不到它，留出集里出现。诚实地说，这比"整族留出"弱一档。
+LED_TIMES = [2, 3, 4, 5]
+WORD_TIMES = {"two": 2, "three": 3, "four": 4, "five": 5}
+CITIES = ["beijing", "shanghai", "guangzhou", "shenzhen",
+          "hangzhou", "chengdu", "wuhan", "xian"]
+
+# 每个族：(模板列表, 由 (颜色, 次数, 城市) 造动作, 组合生成器)
+NEW_FAMILIES = {
+    "blink": (["blink the {c} light {n} times", "blink {c} {n} times",
+               "flash the {c} led {n} times", "make the {c} light blink {n} times"],
+              lambda c, n, city: {"action": "led", "color": c, "effect": "blink", "times": n},
+              lambda: [(c, n, None) for c in LED_COLORS for n in LED_TIMES]),
+    "breath": (["breathe the {c} light", "make the {c} led breathe",
+                "let the {c} light breathe", "{c} light breathing",
+                "fade the {c} light in and out"],
+               lambda c, n, city: {"action": "led", "color": c, "effect": "breath"},
+               lambda: [(c, None, None) for c in LED_COLORS]),
+    "temperature": (["what is the chip temperature", "how hot is the chip",
+                     "read the temperature", "what is your temperature",
+                     "check the chip temperature", "temperature please",
+                     "how warm is the chip running"],
+                    lambda c, n, city: {"action": "temperature"},
+                    lambda: [(None, None, None)]),
+    "time": (["what time is it", "tell me the time", "what is the time now",
+              "do you know the time", "current time please", "give me the time",
+              "what o clock is it"],
+             lambda c, n, city: {"action": "time"},
+             lambda: [(None, None, None)]),
+    "weather": (["what is the weather in {city}", "weather in {city}",
+                 "how is the weather in {city}", "is it raining in {city}",
+                 "what is the temperature outside in {city}",
+                 "tell me the weather in {city}"],
+                lambda c, n, city: {"action": "weather", "city": city},
+                lambda: [(None, None, city) for city in CITIES]),
+    # 通用问答：本地小模型只判断"这题该去问云端"。这些句子刻意**不含**设备名词、
+    # 也不含 time / weather / temperature 那几族的关键词——那几种各有各的动作。
+    "ask": (["what is a microcontroller", "tell me a joke", "who wrote hamlet",
+             "explain what ppp means", "how many people live in china",
+             "what is the capital of france", "why is the sky blue",
+             "what does ram stand for", "give me one fun fact about space",
+             "who invented the transistor", "what is a neural network",
+             "how tall is mount everest", "what language do they speak in brazil",
+             "why do we dream"],
+            lambda c, n, city: {"action": "ask"},
+            lambda: [(None, None, None)]),
+}
+
+HELD_OUT |= set(NEW_FAMILIES) | {"blinkw"}
+
 
 def target_words(t):
     return {"gateway": ["gateway", "router"], "internet": ["internet", "web"],
@@ -123,6 +174,27 @@ def build():
     for tmpl in ["turn on the light", "turn the light on", "light on please",
                  "please turn on the light"]:
         items.append(("turn", tmpl, {"action": "led", "color": "white"}))
+
+    # 数字的词形（"three times"）单独补一批。语音那条路上 ASR 转写出来的是**词**
+    # 而不是数字——实测 "blink the blue light three times" 逐字转写，而第一批只训了
+    # "3 times"，于是语音说这句会翻车（真机上试出来才知道）。
+    global _HELD_OUT_EXTRA
+    for i, tmpl in enumerate(["blink the {c} light {w} times", "blink {c} {w} times",
+                              "make the {c} led blink {w} times",
+                              "flash the {c} light {w} times"]):
+        family = "blinkw" if i == 3 else "blinkw_tr"
+        for c in LED_COLORS:
+            for w, n in WORD_TIMES.items():
+                items.append((family, tmpl.format(c=c, w=w),
+                              {"action": "led", "color": c, "effect": "blink", "times": n}))
+
+    # 第二批动作：最后一个说法留出，其余进训练
+    for fam, (tmpls, make_act, combos) in NEW_FAMILIES.items():
+        for i, tmpl in enumerate(tmpls):
+            family = fam if i == len(tmpls) - 1 else fam + "_tr"
+            for c, n, city in combos():
+                text = tmpl.format(c=c, n=n, city=city) if ("{" in tmpl) else tmpl
+                items.append((family, text, make_act(c, n, city)))
     return items
 
 

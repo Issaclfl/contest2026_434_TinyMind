@@ -14,8 +14,8 @@ USB-TTL 上的 PC，现在拨这块 S3。
 | 项 | 状态 |
 |---|---|
 | 软件 | 完成 |
-| `idf.py build` | **通过**（esp32s3 目标，产出 `sf32lb52_wifi_gateway.bin` 355 KB） |
-| 关键配置 | 已核对生成的 `sdkconfig.h`：`LWIP_PPP_SERVER_SUPPORT=1`、`LWIP_PPP_SUPPORT=1`、`LWIP_IPV4_NAPT=1`、`LWIP_IP_FORWARD=1`、`LWIP_PPP_NOTIFY_PHASE_SUPPORT=1`；VJ 头压缩 / PAP / CHAP / LCP echo 均未启用（正是要的） |
+| `idf.py build` | **通过**（esp32s3 目标，产出 `sf32lb52_wifi_gateway.bin` 1.05 MB；3 MB 的 factory 分区还剩 65%） |
+| 关键配置 | 已核对生成的 `sdkconfig.h`：`LWIP_PPP_SERVER_SUPPORT=1`、`LWIP_PPP_SUPPORT=1`、`LWIP_IPV4_NAPT=1`、`LWIP_IP_FORWARD=1`、`LWIP_PPP_NOTIFY_PHASE_SUPPORT=1`、`ESP_HTTPS_SERVER_ENABLE=1`（语音页的 TLS 口）、`GATEWAY_VOICE_TLS_PORT=443`；VJ 头压缩 / PAP / CHAP / LCP echo 均未启用（正是要的） |
 | 胶水层确实进了构建 | 已核对 `esp_netif_lwip_ppp.c.obj` 与 `lwip/netif/ppp.c.obj` 存在于构建产物中——没有下面那行修改，它们不会被编译，链接必然失败 |
 | 编译期守卫 | 5 处误配做成了 `#error`，见 `main/net_ppp.c` |
 | **PPP 服务端互通（S3 ↔ PC，真机）** | **已验证**（2026-09-18，见"台架实测"一节）：LCP/IPCP 协商成功、地址分配正确、ping 5/5 零丢包 |
@@ -23,9 +23,12 @@ USB-TTL 上的 PC，现在拨这块 S3。
 | **与板子的端到端（板子问、S3 的本地模型答）** | **已验证**（2026-09-18，三根杜邦线，见"与板子联调"一节）：Agent 的 15.5 KB 请求经 PPP 进 S3，模型生成 576 字符回答，12.4 s 返回；S3 重启后板子 6.9 s 自动重拨 |
 | **NAPT 转发（板子经 S3 上公网）** | **已验证**（2026-09-18，2.4 GHz 热点）：板子 ping 223.5.5.5，4/4、0% 丢包、平均 80 ms；期间本地模型端点持续在线。过程逼出一个真实故障并修复（提交 ac6f6fb）：WiFi 驱动的 AMPDU BA 会话 ROM 打印从高优先级任务灌控制台，把 2 KB 的 PPP UART 接收环挤爆（44 ms 余量）→ 已关 AMPDU RX + 环扩到 8 KB，详见台架证据 §七 |
 | **云-端自适应路由** | **已验证**（2026-09-18，真云真 key，见台架证据 §八）：云端在线时板子 `ask` 7.5 s 拿到 271 字节连贯回答（中文提问 PC 直连 3.5–4.7 s）；**关热点** → S3 报 `no uplink -- the local model answers (offline mode)`，板子照样答（本地故事体）；**开热点** → 自动回切云端。过程逮住并修复一个 body 截断 bug（提交 c756cb4）——此前云端一路 400、每次静默降级，功能看着可用而云端腿从未生效 |
+| **命令模型（"说一句就控制"的第三条路由）** | **已验证**（2026-09-19）：自训、自量化的 0.26M 模型把英文口令翻成固定 JSON 动作并执行，**10 类动作 / 47 个不同 JSON 串**（点灯、闪/呼吸、扫 Wi-Fi、ping、状态、片内温度、对时、天气、转云端问答）；留出集 89/102（整批 945/945）；打字口令 1.4~4.4 s，语音 4.0~9.9 s（云端只听、本机决定），板载 RGB 灯真的变色 |
+| **语音页的 TLS 口** | **已验证**（2026-09-19，见下节"为什么 https 是必需的"）：`Server listening on port 443`；`https://<网关>/talk` 与明文口都返回同一份 7541 B 页面；TLS 口上的 `/voice` 3.99 s 出动作、`/v1/chat/completions` 1.02 s 出动作；**真实麦克风那一步待用户手机实测**（本机无麦克风、受控浏览器点不过自签证书，其余环节用合成音源走完了整条链路） |
 
-四项全部真机验证完毕：S3 ↔ PC 互通、板子问/S3 的本地模型答、板子经 S3 上公网、
-本地模型 21–26 tok/s。软件与实测已闭环。
+六项全部真机验证完毕：S3 ↔ PC 互通、板子问/S3 的本地模型答、板子经 S3 上公网、
+本地模型 21–26 tok/s、命令模型驱动板载灯、语音页的 TLS 口。软件与实测已闭环；
+唯一剩下的是**用真手机按住说话**那一下（其余环节都验过，见"语音"一节）。
 
 ## 硬件
 
@@ -195,23 +198,91 @@ gitignore 的 `sdkconfig` 后，同一个 `http://10.0.0.1/v1` 端点就变成�
 网关用的仍然是本地模型，但**把它当命令翻译器用**：英文口令进，固定 JSON 动作出，
 再由 `main/cmd_exec.c` 真的做掉——
 
-    {"action":"led","color":"red|green|blue|white|yellow|off"}
-    {"action":"wifi_scan"}
-    {"action":"ping","target":"gateway|internet|board"}
-    {"action":"status"}
+| 口令 | 动作 JSON | 谁干活 |
+|---|---|---|
+| turn on the red light | `{"action":"led","color":"red\|green\|blue\|white\|yellow\|off"}` | RMT 驱动板载 WS2812 |
+| blink the blue light three times | `{"action":"led","color":"blue","effect":"blink","times":3}` | 同上（闪三下，闪完停在亮着） |
+| make the red light breathe | `{"action":"led","color":"red","effect":"breath"}` | 同上（一轮约 2 秒） |
+| scan the wifi networks | `{"action":"wifi_scan"}` | WiFi 驱动 |
+| ping the gateway/internet/board | `{"action":"ping","target":"…"}` | TCP 连接时延（闭集目标表） |
+| what is your status | `{"action":"status"}` | 网关自己的状态行 |
+| what is the chip temperature | `{"action":"temperature"}` | **片内温度传感器**（真读数） |
+| what time is it | `{"action":"time"}` | SNTP 对时，回 UTC+8 |
+| what is the weather in beijing | `{"action":"weather","city":"beijing"}` | **wttr.in 的真实数据**（免 key，八城闭集） |
+| tell me a joke | `{"action":"ask"}` | **转给云端模型作答** |
+
+最后三行是三种**不同的活**：`temperature` 读传感器、`weather` 取网络数据、`ask` 把
+问题交给云端大模型。`ask` 这条的分工值得说清：**本地小模型只判断"这题该不该问云端"**，
+用户原话由 `net_cloud_ask_text()` 原样转发出去——复述文本正是 0.26M 参数最不擅长的
+事，所以不让它复述，也不让它作答。动作词汇表仍然不出这块板子。
 
 模型不是拿现成的：`../esp32s3_common/tools/` 里从数据、微调到量化三段齐活
-（`make_cmd_dataset.py` → `train_cmd_model.py` → `quantize_model.py`），留出集
-43/46 完全正确，压成 int8 之后还是 43/46。换模型：
+（`make_cmd_dataset.py` → `train_cmd_model.py` → `quantize_model.py`）。第二批量产的
+留出集分数与设备原样日志见 `docs/ESP32-S3网关台架实测证据.md` §十。换模型：
 
-    python3 tools/train_cmd_model.py                    # -> assets/cmd_llm.bin（torch CPU，约 5 分钟）
-    python3 tools/quantize_model.py --input assets/cmd_llm.bin \
+    python tools/train_cmd_model.py                    # -> assets/cmd_llm.bin（torch CPU，约 5 分钟）
+    python tools/quantize_model.py --input assets/cmd_llm.bin \
         --format q8 --output assets/llm_cmdq8.bin
     tools\model.bat COM10 cmdq8                         # 只写 llm 分区
 
-要点：动作里的 IP/端口写死在代码里（`kTargets`），**模型碰不到网络参数**；
-板载 RGB 灯的 GPIO 在 menuconfig（`GATEWAY_LED_GPIO`，rev1.1 是 48）。实测数字、
-原样日志和三条诚实的限制见 `docs/ESP32-S3网关台架实测证据.md` §十。
+要点：动作里的 IP/端口/城市/URL 写死在代码里（`kTargets`、`kCities`），**模型碰不到
+网络参数**；板载 RGB 灯的 GPIO 在 menuconfig（`GATEWAY_LED_GPIO`，rev1.1 是 48）。
+
+## 语音：说一句就控制（`POST /voice` + `GET /talk`，默认 443 上还有一份 TLS）
+
+手机浏览器打开 `https://<网关>/talk`，按住按钮说一句英文口令：云端的 ASR 只负责
+**听**（返回文字），**决定做什么的还是本机那个自训的 `cmd` 模型**，动作词汇表不出这块
+板子。链路、数字与边界见证据文档 §十一。
+
+页面按浏览器给的上下文**自己选腿**（三条都在这一个页面上）：
+
+| 条件 | 页面给出的路 |
+|---|---|
+| `window.isSecureContext` 为真（https） | 按住说话（`getUserMedia`） |
+| http 页面 / 没有安全上下文 | 置灰按钮 + 说明原因 + 换成 https 的链接 + **传一段录音文件**（`decodeAudioData`，降到 16 kHz） |
+| 任何情况都能用 | **直接在页面上打字**（POST `/v1/chat/completions` + `model:"cmd"`，完全本地、断网可用） |
+
+### 为什么 https 是必需的，不是装饰
+
+**浏览器只把 `getUserMedia` 给安全上下文**。http 页面上 `navigator.mediaDevices`
+根本不存在，于是"按住说话"点下去毫无反应——这正是第一版上线在手机上的表现，实测
+`window.isSecureContext === false`、`typeof navigator.mediaDevices === "undefined"`，
+控制台只有一句 `Cannot read properties of undefined (reading 'getUserMedia')`。
+
+所以组件把**同一组路由**在第二个监听口上用 TLS 再注册一遍（`espllm_http_start_secure`，
+端口 `GATEWAY_VOICE_TLS_PORT`，默认 443）。板上 Agent 仍走**明文**那条腿
+（`http://10.0.0.1/v1`）——NuttX 那边的客户端不做 TLS，这条路不能动，两个口并存。
+
+### 自签证书（`main/servercert.pem` / `main/prvtkey.pem`）
+
+这两份文件**故意进仓库**，因为它们**不是秘密**：自签、没有 CA 背书、后面没有任何
+账号或凭据，只为了让浏览器把 `https://<网关>/talk` 当成安全上下文。任何人都能拿这份
+私钥伪造这个页面，而伪造它也拿不到任何东西——页面上没有登录、没有 key，板上 Agent
+走明文那条腿也不碰它。生产环境请换成真证书（`esp_https_server` 只认 PEM）。
+
+生成命令（改 SAN 里的 IP 为你自己的网关地址，`<ip>` 两处都要）：
+
+    MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 3650 \
+      -keyout main/prvtkey.pem -out main/servercert.pem \
+      -subj "/C=CN/O=TinyMind/OU=contest2026/CN=tinymind-gateway" \
+      -addext "subjectAltName=IP:<ip>,IP:10.0.0.1,DNS:tinymind-gateway"
+
+（`MSYS_NO_PATHCONV=1` 是给 Git Bash 用的：不加的话它会把你写的 `/C=CN/...` 当路径改写。）
+
+两个 PEM 由 `main/CMakeLists.txt` 的 `EMBED_TXTFILES` 嵌进固件，符号名是 ESP-IDF 的
+惯例 `_binary_<文件名>_start/_end`。IP 换了不用重签也能用——自签证书本来就会弹一次
+警告，点"继续前往"即可。
+
+### 页面的 JS 怎么验
+
+页面在 C 字符串里，C 编译器是唯一会看它的东西：JS 里少个括号照样编译通过，表现
+就是"手机上按钮又点不动了"。所以有个工具把那个字面量**按编译器的规则解开**，再把
+`<script>` 交给 `node --check`：
+
+    python tools/check_voice_page.py --html /tmp/page.html
+
+它抽出的页面与设备实际发出的**逐字节一致**（实测 7209 B，`diff` 为空）——这是把
+"我以为我写的是什么"和"板子真的发的是什么"钉在一起的最便宜办法。
 
 ## 台架模式：先只验 PPP，不开 WiFi
 

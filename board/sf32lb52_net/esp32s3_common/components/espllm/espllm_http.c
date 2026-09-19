@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -520,59 +521,17 @@ static esp_err_t h_chat(httpd_req_t *req)
     return sent;
 }
 
-/* 「按住说话」页面：录一段音、POST 给 /voice、把 JSON 结果打出来。
- * 采样率按浏览器给的最接近 16 kHz 的值取，然后 3:1 抽到 16 kHz——
- * 云端转写对 16 kHz 足够，而请求体小四倍。 */
-static const char VOICE_PAGE_HTML[] =
-    "<!doctype html><html><head><meta charset=\"utf-8\">"
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-    "<title>talk to the board</title><style>"
-    "body{background:#101418;color:#d8e0e8;font-family:monospace;text-align:center;"
-    "padding:24px}button{font-size:22px;padding:20px 34px;border-radius:12px;border:0;"
-    "background:#7fd0a0;color:#08120c;font-weight:bold}button:active{background:#4f9f78}"
-    "pre{text-align:left;white-space:pre-wrap;font-size:15px;line-height:1.5;"
-    "max-width:640px;margin:18px auto;color:#9fb0c0}</style></head><body>"
-    "<h3>按住说一句英文口令</h3>"
-    "<p><button id=\"b\">按住说话</button></p><pre id=\"o\">（等按钮变成绿色再按）</pre>"
-    "<script>"
-    "let ac,stream,src,node,chunks=[],rec=false;"
-    "async function start(){"
-    " stream=await navigator.mediaDevices.getUserMedia({audio:true});"
-    " ac=new (window.AudioContext||window.webkitAudioContext)();"
-    " src=ac.createMediaStreamSource(stream);node=ac.createScriptProcessor(4096,1,1);"
-    " chunks=[];node.onaudioprocess=e=>{if(rec)chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)))};"
-    " src.connect(node);node.connect(ac.destination);rec=true;"
-    " document.getElementById('o').textContent='录音中…说完松开';}"
-    "function wav(){"
-    " let sr=ac.sampleRate,n=0;chunks.forEach(c=>n+=c.length);"
-    " const all=new Float32Array(n);let o=0;chunks.forEach(c=>{all.set(c,o);o+=c.length});"
-    " const step=Math.max(1,Math.round(sr/16000)),m=Math.floor(n/step),buf=new ArrayBuffer(44+m*2),"
-    " v=new DataView(buf);"
-    " const w=(p,s)=>{for(let i=0;i<s.length;i++)v.setUint8(p+i,s.charCodeAt(i))};"
-    " w(0,'RIFF');v.setUint32(4,36+m*2,true);w(8,'WAVEfmt ');v.setUint32(16,16,true);"
-    " v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,16000,true);"
-    " v.setUint32(28,32000,true);v.setUint16(32,2,true);v.setUint16(34,16,true);"
-    " w(36,'data');v.setUint32(40,m*2,true);"
-    " for(let i=0;i<m;i++){let s=all[i*step];s=Math.max(-1,Math.min(1,s));"
-    " v.setInt16(44+i*2,s<0?s*32768:s*32767,true)}"
-    " return new Blob([buf],{type:'audio/wav'});}"
-    "async function stop(){"
-    " rec=false;node.disconnect();src.disconnect();stream.getTracks().forEach(t=>t.stop());"
-    " ac.close();const b=wav();const o=document.getElementById('o');"
-    " o.textContent='上传 '+b.size+' B …';"
-    " const t0=Date.now();"
-    " try{const r=await fetch('/voice',{method:'POST',body:b});"
-    "  o.textContent=await r.text()+'\\n\\n（'+(Date.now()-t0)+' ms）';}"
-    " catch(e){o.textContent='请求失败: '+e;}}"
-    "const btn=document.getElementById('b');"
-    "btn.addEventListener('pointerdown',e=>{e.preventDefault();start()});"
-    "btn.addEventListener('pointerup',e=>{e.preventDefault();stop()});"
-    "</script></body></html>";
-
+/* 「按住说话」这个页面**不由组件提供**：页面文案、录音交互，以及"浏览器只在
+ * 安全上下文里给麦克风"这件事都是应用侧的内容（网关那台机器上是
+ * main/voice_exec.c 里的 kVoicePage）。组件只负责把 s_voice_page 原样发出去，
+ * 没设页面时如实说没有，不去假装有一个能用的页面。 */
 static esp_err_t h_talk(httpd_req_t *req)
 {
+    if (s_voice_page == NULL) {
+        return send_error(req, "503 Service Unavailable", "no voice page configured");
+    }
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_sendstr(req, s_voice_page != NULL ? s_voice_page : VOICE_PAGE_HTML);
+    return httpd_resp_sendstr(req, s_voice_page);
 }
 
 static esp_err_t h_voice(httpd_req_t *req)
@@ -610,6 +569,27 @@ static esp_err_t h_voice(httpd_req_t *req)
     return sent;
 }
 
+static const httpd_uri_t kUris[] = {
+    { .uri = "/", .method = HTTP_GET, .handler = h_dashboard },
+    { .uri = "/status", .method = HTTP_GET, .handler = h_status },
+    { .uri = "/talk", .method = HTTP_GET, .handler = h_talk },
+    { .uri = "/voice", .method = HTTP_POST, .handler = h_voice },
+    { .uri = "/v1/models", .method = HTTP_GET, .handler = h_models },
+    { .uri = "/v1/chat/completions", .method = HTTP_POST, .handler = h_chat },
+};
+
+static esp_err_t register_uris(httpd_handle_t server)
+{
+    for (size_t i = 0; i < sizeof(kUris) / sizeof(kUris[0]); i++) {
+        esp_err_t err = httpd_register_uri_handler(server, &kUris[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "could not register %s: %s", kUris[i].uri, esp_err_to_name(err));
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
 esp_err_t espllm_http_start(uint16_t port)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -630,24 +610,50 @@ esp_err_t espllm_http_start(uint16_t port)
         ESP_LOGE(TAG, "httpd_start failed on port %u: %s", (unsigned)port, esp_err_to_name(err));
         return err;
     }
-
-    const httpd_uri_t uris[] = {
-        { .uri = "/", .method = HTTP_GET, .handler = h_dashboard },
-        { .uri = "/status", .method = HTTP_GET, .handler = h_status },
-        { .uri = "/talk", .method = HTTP_GET, .handler = h_talk },
-        { .uri = "/voice", .method = HTTP_POST, .handler = h_voice },
-        { .uri = "/v1/models", .method = HTTP_GET, .handler = h_models },
-        { .uri = "/v1/chat/completions", .method = HTTP_POST, .handler = h_chat },
-    };
-    for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
-        err = httpd_register_uri_handler(server, &uris[i]);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "could not register %s: %s", uris[i].uri, esp_err_to_name(err));
-            return err;
-        }
+    err = register_uris(server);
+    if (err != ESP_OK) {
+        httpd_stop(server);
+        return err;
     }
 
     ESP_LOGI(TAG, "openai-compatible endpoint listening on port %u "
                   "(GET /, GET /v1/models, POST /v1/chat/completions)", (unsigned)port);
+    return ESP_OK;
+}
+
+esp_err_t espllm_http_start_secure(uint16_t port, const uint8_t *cert, size_t cert_len,
+                                   const uint8_t *key, size_t key_len)
+{
+    if (cert == NULL || key == NULL || cert_len == 0 || key_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
+    config.servercert = cert;
+    config.servercert_len = cert_len;
+    config.prvtkey_pem = key;
+    config.prvtkey_len = key_len;
+    config.port_secure = port;
+    config.httpd.max_uri_handlers = sizeof(kUris) / sizeof(kUris[0]);
+    /* Same reason as above: /v1/chat/completions runs generation on this task. */
+    config.httpd.stack_size = CONFIG_ESPLM_HTTP_TASK_STACK;
+    config.httpd.lru_purge_enable = true;
+    config.httpd.recv_wait_timeout = 10;
+    config.httpd.send_wait_timeout = 60;
+
+    httpd_handle_t server = NULL;
+    esp_err_t err = httpd_ssl_start(&server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_ssl_start failed on port %u: %s", (unsigned)port, esp_err_to_name(err));
+        return err;
+    }
+    err = register_uris(server);
+    if (err != ESP_OK) {
+        httpd_ssl_stop(server);
+        return err;
+    }
+
+    ESP_LOGI(TAG, "the same routes are also on TLS port %u (a browser only hands out "
+                  "the microphone to a secure origin)", (unsigned)port);
     return ESP_OK;
 }

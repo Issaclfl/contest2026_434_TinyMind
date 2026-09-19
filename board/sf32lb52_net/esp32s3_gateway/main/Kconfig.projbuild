@@ -13,6 +13,22 @@ menu "SF32LB52 gateway"
                 7-8 s thinking before it transcribes, against 1.6 s for this
                 one (both measured, see the evidence doc §十一).
 
+    config GATEWAY_VOICE_TLS_PORT
+        int "TLS port for the voice page"
+        default 443
+        help
+            The same routes that listen on the plain HTTP port are served again
+            over TLS here.  This is not decoration: a browser only hands out the
+            microphone to a secure origin, so on http://<gateway>/talk
+            navigator.mediaDevices is undefined and the hold-to-talk button does
+            nothing at all (measured: window.isSecureContext === false, and a
+            console line "Cannot read properties of undefined (reading
+            'getUserMedia')").  The board's agent keeps using the plain-HTTP leg
+            at http://10.0.0.1/v1, so both ports stay up.
+
+            The certificate is self-signed: the browser asks once and the page
+            works after "proceed anyway".  See ../README.md.
+
     config GATEWAY_CMD_LED
         bool "Let the command model drive the onboard RGB led"
         default y
