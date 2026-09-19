@@ -3,7 +3,7 @@ ai_agent 补丁：语音通路（离线播报 + 在线 TTS）+ 极简状态屏 +
 应用：git -C packages/ai_agent apply --whitespace=nowarn <本补丁>
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index f1b6b4a..5675f0e 100644
+index f1b6b4a..858bb59 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -53,6 +53,7 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
@@ -14,12 +14,13 @@ index f1b6b4a..5675f0e 100644
      src/tools/tool_media.c
      src/tools/tool_proxyquickapp.c
      src/tools/skill_loader.c
-@@ -66,8 +67,11 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
+@@ -66,8 +67,12 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
      src/voice/audio_capture.c
      src/voice/audio_playback.c
      src/voice/voice_channel.c
 +    src/voice/mimo_tts.c
 +    src/voice/voice_say.c
++    src/voice/action_speak.c
      src/stubs.c
      src/ui/qrcode_display.c
 +    src/ui/agent_screen.c
@@ -163,19 +164,20 @@ index 0000000..e426240
 +}
 +#endif
 diff --git a/src/agent_main.c b/src/agent_main.c
-index 9d676c2..1267493 100644
+index 9d676c2..ede696c 100644
 --- a/src/agent_main.c
 +++ b/src/agent_main.c
-@@ -71,6 +71,8 @@
+@@ -71,6 +71,9 @@
  #include "tools/skill_sync.h"
  #endif
  #include "voice/voice_channel.h"
 +#include "voice/voice_say.h"
++#include "voice/action_speak.h"
 +#include "ui/agent_screen.h"
  #ifdef CONFIG_AI_AGENT_WEIXIN
  #include "channels/weixin_channel.h"
  #endif
-@@ -327,6 +329,39 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
+@@ -327,6 +330,39 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
  static volatile bool s_voice_cooldown;
  static time_t s_voice_cooldown_until;
  
@@ -215,25 +217,27 @@ index 9d676c2..1267493 100644
  /**
   * Reads messages from the outbound queue and dispatches them to the
   * appropriate channel (FeiShu, WebSocket, CLI, etc.).
-@@ -435,6 +470,17 @@ static void* outbound_dispatch_task(void* arg)
+@@ -435,6 +471,19 @@ static void* outbound_dispatch_task(void* arg)
              fflush(stdout);
              pthread_mutex_unlock(&g_stdout_lock);
              syslog(LOG_INFO, "[agent] [Agent]: %s\n", msg.content);
 +
-+            /* Mirror the reply onto the board's LCD (if one is attached) so
-+             * the device shows what it says. */
++            /* An action from the local command model gets a Chinese line and
++             * the matching offline announcement (works with no network);
++             * anything else is mirrored as-is and, with say_auto on, read out
++             * through the cloud TTS path. */
 +
-+            agent_screen_show(msg.content);
++            if (action_announce(msg.content) != 0) {
++                agent_screen_show(msg.content);
 +
-+            /* say_auto on: read the reply out through the speaker too. */
-+
-+            if (voice_say_get_auto()) {
-+                say_async(msg.content);
++                if (voice_say_get_auto()) {
++                    say_async(msg.content);
++                }
 +            }
          } else {
              syslog(LOG_WARNING, "[%s] Unknown channel: %s\n", TAG, msg.channel);
          }
-@@ -605,6 +651,17 @@ int ai_agent_main(int argc, char* argv[])
+@@ -605,6 +654,17 @@ int ai_agent_main(int argc, char* argv[])
          BOOT_LOG_RC(&t0, "P4", "nsh_commands_init", rc);
      }
  
