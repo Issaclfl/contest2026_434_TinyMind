@@ -1,9 +1,9 @@
-ai_agent 语音通路补丁：离线播报 + MiMo TTS + /dev/audio0 播放后端
+ai_agent 补丁：语音通路（离线播报 + 在线 TTS）+ 极简状态屏 + 免密钥天气工具
 基线：packages/ai_agent @ 41723c6
 应用：git -C packages/ai_agent apply --whitespace=nowarn <本补丁>
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index f1b6b4a..38a7002 100644
+index f1b6b4a..5675f0e 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -53,6 +53,7 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
@@ -14,7 +14,7 @@ index f1b6b4a..38a7002 100644
      src/tools/tool_media.c
      src/tools/tool_proxyquickapp.c
      src/tools/skill_loader.c
-@@ -66,6 +67,8 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
+@@ -66,8 +67,11 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
      src/voice/audio_capture.c
      src/voice/audio_playback.c
      src/voice/voice_channel.c
@@ -22,12 +22,15 @@ index f1b6b4a..38a7002 100644
 +    src/voice/voice_say.c
      src/stubs.c
      src/ui/qrcode_display.c
++    src/ui/agent_screen.c
    )
+ 
+   # Optional modules
 diff --git a/include/agent_config.h b/include/agent_config.h
-index 711bb6d..b72fbc4 100644
+index 711bb6d..b61db8c 100644
 --- a/include/agent_config.h
 +++ b/include/agent_config.h
-@@ -380,6 +380,14 @@
+@@ -380,6 +380,18 @@
  #define AGENT_CFG_KEY_VOLC_CLUSTER "volc_cluster"
  #define AGENT_CFG_KEY_VOLC_ASR_CLUSTER "volc_asr_cluster"
  
@@ -39,9 +42,62 @@ index 711bb6d..b72fbc4 100644
 + * unset means "use the board's own node if there is one" (see voice_say.c). */
 +#define AGENT_CFG_KEY_AUDIO_PLAYBACK_DEV "audio_playback_dev"
 +
++/* Minimal status screen: framebuffer and touch nodes (see agent_screen.c). */
++#define AGENT_SCREEN_FB_DEV "/dev/lcd0"
++#define AGENT_SCREEN_INPUT_DEV "/dev/input0"
++
  /* Default TTS speaker and cluster */
  #define AGENT_VOICE_DEFAULT_SPEAKER "zh_male_beijingxiaoye_emo_v2_mars_bigtts"
  #define AGENT_VOICE_DEFAULT_CLUSTER "volcano_tts"
+diff --git a/include/ui/agent_screen.h b/include/ui/agent_screen.h
+new file mode 100644
+index 0000000..e2b0e0a
+--- /dev/null
++++ b/include/ui/agent_screen.h
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Minimal agent status screen.
++ *
++ * The upstream LVGL chat channel (lvgl_ui_channel.c) assumes a 466x466 round
++ * watch panel, a Vela/FreeType CJK font service and a system that already
++ * owns LVGL.  A bare devkit board has none of those, so this brings up LVGL
++ * the way apps/examples/lvgldemo does and shows one wrapping text label in
++ * LVGL's built-in CJK font.
++ *
++ * init returns OK, or a negative errno when there is no display to drive
++ * (in which case show() is a no-op). */
++
++int agent_screen_init(const char* fb_path, const char* input_path);
++
++/* Replace the on-screen text.  Safe to call from any thread; the label is
++ * updated by the LVGL task. */
++
++void agent_screen_show(const char* text);
++
++#ifdef __cplusplus
++}
++#endif
 diff --git a/include/voice/voice_say.h b/include/voice/voice_say.h
 new file mode 100644
 index 0000000..e426240
@@ -103,18 +159,19 @@ index 0000000..e426240
 +}
 +#endif
 diff --git a/src/agent_main.c b/src/agent_main.c
-index 9d676c2..eac9306 100644
+index 9d676c2..1267493 100644
 --- a/src/agent_main.c
 +++ b/src/agent_main.c
-@@ -71,6 +71,7 @@
+@@ -71,6 +71,8 @@
  #include "tools/skill_sync.h"
  #endif
  #include "voice/voice_channel.h"
 +#include "voice/voice_say.h"
++#include "ui/agent_screen.h"
  #ifdef CONFIG_AI_AGENT_WEIXIN
  #include "channels/weixin_channel.h"
  #endif
-@@ -327,6 +328,39 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
+@@ -327,6 +329,39 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
  static volatile bool s_voice_cooldown;
  static time_t s_voice_cooldown_until;
  
@@ -154,10 +211,15 @@ index 9d676c2..eac9306 100644
  /**
   * Reads messages from the outbound queue and dispatches them to the
   * appropriate channel (FeiShu, WebSocket, CLI, etc.).
-@@ -435,6 +469,12 @@ static void* outbound_dispatch_task(void* arg)
+@@ -435,6 +470,17 @@ static void* outbound_dispatch_task(void* arg)
              fflush(stdout);
              pthread_mutex_unlock(&g_stdout_lock);
              syslog(LOG_INFO, "[agent] [Agent]: %s\n", msg.content);
++
++            /* Mirror the reply onto the board's LCD (if one is attached) so
++             * the device shows what it says. */
++
++            agent_screen_show(msg.content);
 +
 +            /* say_auto on: read the reply out through the speaker too. */
 +
@@ -167,20 +229,39 @@ index 9d676c2..eac9306 100644
          } else {
              syslog(LOG_WARNING, "[%s] Unknown channel: %s\n", TAG, msg.channel);
          }
+@@ -605,6 +651,17 @@ int ai_agent_main(int argc, char* argv[])
+         BOOT_LOG_RC(&t0, "P4", "nsh_commands_init", rc);
+     }
+ 
++    /* ── Status screen (optional: no display, no harm) ─────── */
++
++    {
++        int rc = agent_screen_init(AGENT_SCREEN_FB_DEV, AGENT_SCREEN_INPUT_DEV);
++        BOOT_LOG_RC(&t0, "P4", "agent_screen_init", rc);
++
++        if (rc == OK) {
++            agent_screen_show("TinyMind 就绪");
++        }
++    }
++
+     /* ── Phase 5: Network — async, does NOT block ready ────── */
+ 
+     /* Kick off WiFi reconnect and start outbound dispatch immediately.
 diff --git a/src/channels/nsh_commands.c b/src/channels/nsh_commands.c
-index 25875b5..431ca2f 100644
+index 25875b5..474c8b3 100644
 --- a/src/channels/nsh_commands.c
 +++ b/src/channels/nsh_commands.c
-@@ -41,6 +41,8 @@
+@@ -41,6 +41,9 @@
  #include "tools/tool_proxyquickapp.h"
  #include "tools/tool_registry.h"
  #include "tools/tool_web_search.h"
 +#include "voice/audio_playback.h"
 +#include "voice/voice_say.h"
++#include "ui/agent_screen.h"
  #include "agent_compat.h"
  #include "agent_config.h"
  
-@@ -596,6 +598,115 @@ static void cmd_ask(int argc, char** argv)
+@@ -596,6 +599,116 @@ static void cmd_ask(int argc, char** argv)
      syslog(LOG_INFO, "[agent] ask: %s\n", content);
  }
  
@@ -203,6 +284,7 @@ index 25875b5..431ca2f 100644
 +    }
 +
 +    printf("Speaking: %s\n", text);
++    agent_screen_show(text); /* 说的同时显示在屏上 */
 +    int ret = voice_say_text(text);
 +    if (ret != 0)
 +        printf("say failed: %d\n", ret);
@@ -296,7 +378,7 @@ index 25875b5..431ca2f 100644
  static void cmd_cron_start(void)
  {
      if (cron_service_start() == OK) {
-@@ -975,6 +1086,14 @@ static void* cli_thread(void* arg)
+@@ -975,6 +1088,14 @@ static void* cli_thread(void* arg)
              cmd_heartbeat_trigger();
          else if (strcmp(cmd, "ask") == 0)
              cmd_ask(argc, argv);
@@ -433,6 +515,458 @@ index 33583e7..97b4822 100644
      pthread_mutex_unlock(&s_tools_mtx);
  }
  
+diff --git a/src/tools/tool_web_search.c b/src/tools/tool_web_search.c
+index 7499684..7e2a3c9 100644
+--- a/src/tools/tool_web_search.c
++++ b/src/tools/tool_web_search.c
+@@ -28,6 +28,7 @@
+ #include "infra/vela_tls.h"
+ 
+ #include <string.h>
++#include <strings.h>
+ #include <stdlib.h>
+ #include <stddef.h>
+ #include "cJSON.h"
+@@ -544,33 +545,211 @@ int tool_web_search_set_news_key(const char *key)
+ 
+ /* ──────────────────────────────────────────────────────────────
+  * get_weather tool
+- *   Input JSON: { "location": "Shanghai" }
+- *   Backends: Tavily → SerpAPI
++ *   Input JSON: { "location": "Shanghai" }   (location may be omitted:
++ *   wttr.in then resolves the city from the device's egress IP, which is
++ *   what "local weather" means on a board with no GPS)
++ *   Backend: wttr.in over HTTPS -- no API key, no search-plan dependency.
++ *   Falls back to Tavily / SerpAPI if one of those keys is configured and
++ *   wttr.in is unreachable.
+  * ──────────────────────────────────────────────────────────────*/
+ 
+-int tool_get_weather_execute(const char *input_json, char *output, size_t output_size)
++#define WEATHER_RESP_SIZE (48 * 1024)
++
++/* wttr.in describes conditions in English; the reply may be spoken aloud in
++ * the no-LLM fast path, so map the common ones. */
++
++static const struct {
++    const char *en;
++    const char *zh;
++} s_weather_terms[] = {
++    { "Sunny",              "晴" },
++    { "Clear",              "晴" },
++    { "Partly cloudy",      "多云" },
++    { "Cloudy",             "多云" },
++    { "Overcast",           "阴" },
++    { "Mist",               "薄雾" },
++    { "Fog",                "雾" },
++    { "Freezing fog",       "冻雾" },
++    { "Smoky haze",         "烟霾" },
++    { "Haze",               "霾" },
++    { "Patchy rain nearby", "零星小雨" },
++    { "Light drizzle",      "毛毛雨" },
++    { "Light rain",         "小雨" },
++    { "Moderate rain",      "中雨" },
++    { "Heavy rain",         "大雨" },
++    { "Light snow",         "小雪" },
++    { "Moderate snow",      "中雪" },
++    { "Heavy snow",         "大雪" },
++    { "Thundery outbreaks in nearby", "雷阵雨" },
++    { "Patchy light rain with thunder", "雷阵雨" },
++    { "Thunderstorm",       "雷暴" },
++};
++
++static const char *weather_zh(const char *en)
+ {
+-    cJSON *input = cJSON_Parse(input_json);
+-    if (!input) {
+-        snprintf(output, output_size, "Error: Invalid input JSON");
++    for (size_t i = 0; i < sizeof(s_weather_terms) / sizeof(s_weather_terms[0]); i++) {
++        if (strcasecmp(s_weather_terms[i].en, en) == 0) {
++            return s_weather_terms[i].zh;
++        }
++    }
++
++    return en; /* unknown: keep the original wording rather than guess */
++}
++
++/* Turn wttr.in's j1 JSON into one short, speakable line. */
++
++static int weather_summarize(const char *json, char *output, size_t output_size)
++{
++    cJSON *root = cJSON_Parse(json);
++    if (!root) {
++        return ERROR;
++    }
++
++    const char *city = NULL;
++    double temp = 0, humidity = 0, wind = 0, tmax = 0, tmin = 0;
++    const char *desc = NULL;
++
++    cJSON *area = cJSON_GetObjectItem(root, "nearest_area");
++    cJSON *first = cJSON_IsArray(area) ? cJSON_GetArrayItem(area, 0) : NULL;
++    cJSON *name = first ? cJSON_GetObjectItem(first, "areaName") : NULL;
++    cJSON *name0 = cJSON_IsArray(name) ? cJSON_GetArrayItem(name, 0) : NULL;
++    cJSON *nv = name0 ? cJSON_GetObjectItem(name0, "value") : NULL;
++    if (cJSON_IsString(nv)) {
++        city = nv->valuestring;
++    }
++
++    cJSON *cur = cJSON_GetObjectItem(root, "current_condition");
++    cJSON *c0 = cJSON_IsArray(cur) ? cJSON_GetArrayItem(cur, 0) : NULL;
++    if (c0) {
++        cJSON *v;
++        if (cJSON_IsString(v = cJSON_GetObjectItem(c0, "temp_C")))
++            temp = atof(v->valuestring);
++        if (cJSON_IsString(v = cJSON_GetObjectItem(c0, "humidity")))
++            humidity = atof(v->valuestring);
++        if (cJSON_IsString(v = cJSON_GetObjectItem(c0, "windspeedKmph")))
++            wind = atof(v->valuestring);
++        cJSON *d = cJSON_GetObjectItem(c0, "weatherDesc");
++        cJSON *d0 = cJSON_IsArray(d) ? cJSON_GetArrayItem(d, 0) : NULL;
++        cJSON *dv = d0 ? cJSON_GetObjectItem(d0, "value") : NULL;
++        if (cJSON_IsString(dv)) {
++            desc = dv->valuestring;
++        }
++    }
++
++    cJSON *w = cJSON_GetObjectItem(root, "weather");
++    cJSON *w0 = cJSON_IsArray(w) ? cJSON_GetArrayItem(w, 0) : NULL;
++    if (w0) {
++        cJSON *v;
++        if (cJSON_IsString(v = cJSON_GetObjectItem(w0, "maxtempC")))
++            tmax = atof(v->valuestring);
++        if (cJSON_IsString(v = cJSON_GetObjectItem(w0, "mintempC")))
++            tmin = atof(v->valuestring);
++    }
++
++    if (!city && !desc) {
++        cJSON_Delete(root);
+         return ERROR;
+     }
+ 
+-    cJSON *loc_item = cJSON_GetObjectItem(input, "location");
+-    if (!loc_item || !cJSON_IsString(loc_item) || loc_item->valuestring[0] == '\0') {
++    if (tmax != 0 || tmin != 0) {
++        snprintf(output, output_size, "%s%s%.0f度%s，湿度%.0f%%，今日%.0f到%.0f度",
++            city ? city : "", city ? "：" : "", temp,
++            desc ? weather_zh(desc) : "", humidity, tmin, tmax);
++    } else {
++        snprintf(output, output_size, "%s%s%.0f度%s，湿度%.0f%%，风速%.0f公里每小时",
++            city ? city : "", city ? "：" : "", temp,
++            desc ? weather_zh(desc) : "", humidity, wind);
++    }
++
++    cJSON_Delete(root);
++    return OK;
++}
++
++/* The no-LLM fast path hands us whatever text preceded "天气", so "今天" or
++ * "当地" arrive looking like place names.  They are not: drop them and let
++ * wttr.in resolve the city from the egress IP (i.e. report the local
++ * weather, which is what the user asked for). */
++
++static int weather_location_is_noise(const char *loc)
++{
++    static const char *noise[] = {
++        "今天", "明天", "后天", "现在", "当前", "当地", "本地", "我这儿",
++        "这里", "这", "的", "查", "查一下", "看看", "怎么样", "如何",
++        "today", "tomorrow", "now", "local", "here", "currently", "the",
++    };
++
++    for (size_t i = 0; i < sizeof(noise) / sizeof(noise[0]); i++) {
++        if (strcasecmp(noise[i], loc) == 0) {
++            return 1;
++        }
++    }
++
++    return 0;
++}
++
++int tool_get_weather_execute(const char *input_json, char *output, size_t output_size)
++{
++    char location[256] = "";
++    char *resp;
++    int status;
++    int ret;
++
++    cJSON *input = cJSON_Parse(input_json);
++    if (input) {
++        cJSON *loc_item = cJSON_GetObjectItem(input, "location");
++        if (loc_item && cJSON_IsString(loc_item) && loc_item->valuestring[0]) {
++            strncpy(location, loc_item->valuestring, sizeof(location) - 1);
++            /* wttr.in takes one token: drop spaces (e.g. "New York" -> "NewYork"). */
++            char *w = location;
++            for (const char *r = location; *r; r++) {
++                if (*r != ' ' && *r != '\t') {
++                    *w++ = *r;
++                }
++            }
++            *w = '\0';
++        }
+         cJSON_Delete(input);
+-        snprintf(output, output_size, "Error: Missing 'location' field");
++    }
++
++    if (location[0] && weather_location_is_noise(location)) {
++        location[0] = '\0';
++    }
++
++    syslog(LOG_INFO, "[%s] Weather query: '%s'\n", TAG,
++        location[0] ? location : "(local, by egress IP)");
++
++    resp = malloc(WEATHER_RESP_SIZE);
++    if (!resp) {
++        snprintf(output, output_size, "Error: out of memory");
+         return ERROR;
+     }
+ 
+-    char location[256];
+-    strncpy(location, loc_item->valuestring, sizeof(location) - 1);
+-    cJSON_Delete(input);
++    char path[320];
++    if (location[0]) {
++        snprintf(path, sizeof(path), "/%s?format=j1", location);
++    } else {
++        snprintf(path, sizeof(path), "/?format=j1");
++    }
++
++    status = vela_https_get("wttr.in", "443", path, resp, WEATHER_RESP_SIZE);
++    if (status == 200) {
++        ret = weather_summarize(resp, output, output_size);
++        free(resp);
++        if (ret == OK) {
++            syslog(LOG_INFO, "[%s] Weather via wttr.in OK\n", TAG);
++            return OK;
++        }
++    } else {
++        syslog(LOG_WARNING, "[%s] wttr.in HTTP %d\n", TAG, status);
++    }
++
++    free(resp);
+ 
+-    syslog(LOG_INFO, "[%s] Weather query: %s\n", TAG, location);
++    /* Fall back to a search backend only if one is configured. */
+ 
+     char search_query[300];
+-    snprintf(search_query, sizeof(search_query), "%s weather today", location);
++    snprintf(search_query, sizeof(search_query), "%s weather today",
++        location[0] ? location : "local");
+ 
+     if (s_tavily_key[0]) {
+         int err = tavily_search(search_query, output, output_size);
+@@ -590,8 +769,8 @@ int tool_get_weather_execute(const char *input_json, char *output, size_t output
+     }
+ 
+     snprintf(output, output_size,
+-             "Error: Could not fetch weather for '%s'. Set key via set_tavily_key or set_search_key.",
+-             location);
++             "Error: could not fetch weather (wttr.in unreachable%s).",
++             s_tavily_key[0] || s_serp_key[0] ? ", search fallback failed too" : "");
+     return ERROR;
+ }
+ 
+diff --git a/src/ui/agent_screen.c b/src/ui/agent_screen.c
+new file mode 100644
+index 0000000..009287a
+--- /dev/null
++++ b/src/ui/agent_screen.c
+@@ -0,0 +1,197 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/* agent_screen.c - minimal LVGL status screen for boards without a UI stack.
++ *
++ * Bring-up mirrors apps/examples/lvgldemo: lv_init(), lv_nuttx_dsc_init() with
++ * the framebuffer and touch device, lv_nuttx_init(), then a task that pumps
++ * lv_timer_handler().  Text is drawn with LVGL's built-in CJK font so Chinese
++ * renders without FreeType or a font service.
++ *
++ * Only the agent's own text goes here -- no widgets, no chat history.  It
++ * exists so the board can show what it is saying while it says it. */
++
++#include "ui/agent_screen.h"
++
++#include "agent_compat.h"
++#include "agent_config.h"
++
++#include <errno.h>
++#include <stdbool.h>
++#include <string.h>
++#include <syslog.h>
++
++#ifdef CONFIG_GRAPHICS_LVGL
++
++#include <pthread.h>
++#include <stdio.h>
++#include <unistd.h>
++
++#include <lvgl/lvgl.h>
++
++static const char* TAG = "screen";
++
++#define SCREEN_TEXT_MAX 512
++#define SCREEN_TASK_STACK 8192
++#define SCREEN_TASK_PRIO 90   /* below the audio/agent threads */
++
++static lv_display_t* s_disp;
++static lv_obj_t* s_title;
++static lv_obj_t* s_body;
++static pthread_t s_task;
++static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
++static char s_pending[SCREEN_TEXT_MAX];
++static volatile bool s_has_pending;
++static volatile bool s_running;
++static bool s_inited;
++
++/* Runs in the LVGL task: every LVGL call happens here, which is what keeps
++ * the label update safe against the render timer. */
++
++static void* screen_task(void* arg)
++{
++    (void)arg;
++
++    while (s_running) {
++        if (s_has_pending) {
++            pthread_mutex_lock(&s_lock);
++            if (s_body) {
++                lv_label_set_text(s_body, s_pending);
++            }
++            s_has_pending = false;
++            pthread_mutex_unlock(&s_lock);
++        }
++
++        uint32_t idle = lv_timer_handler();
++        usleep((idle > 0 && idle < 100 ? idle : 10) * 1000);
++    }
++
++    return NULL;
++}
++
++int agent_screen_init(const char* fb_path, const char* input_path)
++{
++    lv_nuttx_dsc_t info;
++    lv_nuttx_result_t result;
++
++    if (s_inited) {
++        return OK;
++    }
++
++    s_inited = true;
++
++    lv_init();
++    lv_nuttx_dsc_init(&info);
++
++    if (fb_path) {
++        info.fb_path = fb_path;
++    }
++
++    if (input_path) {
++        info.input_path = input_path;
++    }
++
++    lv_nuttx_init(&info, &result);
++    if (result.disp == NULL) {
++        syslog(LOG_WARNING, "[%s] no display on %s\n", TAG,
++            fb_path ? fb_path : "(default)");
++        return -ENODEV;
++    }
++
++    s_disp = result.disp;
++
++    lv_obj_t* scr = lv_obj_create(NULL);
++    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101018), 0);
++    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
++    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
++
++    s_title = lv_label_create(scr);
++    lv_label_set_text(s_title, "TinyMind");
++    lv_obj_set_style_text_color(s_title, lv_color_hex(0x7fd1ff), 0);
++    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 12);
++
++    s_body = lv_label_create(scr);
++    lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);
++    lv_obj_set_width(s_body, lv_pct(88));
++    lv_obj_set_style_text_color(s_body, lv_color_hex(0xf0f0f0), 0);
++    lv_label_set_text(s_body, "ready");
++    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 0);
++
++#if LV_FONT_SIMSUN_16_CJK
++    /* Chinese needs a CJK-capable font; the default Montserrat has no
++     * glyphs for it and the text would come out blank. */
++    lv_obj_set_style_text_font(s_title, &lv_font_simsun_16_cjk, 0);
++    lv_obj_set_style_text_font(s_body, &lv_font_simsun_16_cjk, 0);
++    syslog(LOG_INFO, "[%s] using built-in CJK font\n", TAG);
++#else
++    syslog(LOG_WARNING, "[%s] CJK font not built in: Chinese will not render\n",
++        TAG);
++#endif
++
++    lv_screen_load(scr);
++
++    s_running = true;
++
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setstacksize(&attr, SCREEN_TASK_STACK);
++
++    if (pthread_create(&s_task, &attr, screen_task, NULL) != 0) {
++        syslog(LOG_ERR, "[%s] lvgl task create failed\n", TAG);
++        s_running = false;
++        pthread_attr_destroy(&attr);
++        return -EIO;
++    }
++
++    pthread_attr_destroy(&attr);
++
++    syslog(LOG_INFO, "[%s] up: %s\n", TAG, fb_path ? fb_path : "(default)");
++    return OK;
++}
++
++void agent_screen_show(const char* text)
++{
++    if (!s_running || !text || !text[0]) {
++        return;
++    }
++
++    pthread_mutex_lock(&s_lock);
++    strncpy(s_pending, text, sizeof(s_pending) - 1);
++    s_pending[sizeof(s_pending) - 1] = '\0';
++    s_has_pending = true;
++    pthread_mutex_unlock(&s_lock);
++}
++
++#else /* !CONFIG_GRAPHICS_LVGL */
++
++/* Built without LVGL: nothing to draw on, and the callers stay unchanged. */
++
++static const char* TAG = "screen";
++
++int agent_screen_init(const char* fb_path, const char* input_path)
++{
++    (void)fb_path;
++    (void)input_path;
++    syslog(LOG_INFO, "[%s] LVGL not enabled: no status screen\n", TAG);
++    return -ENODEV;
++}
++
++void agent_screen_show(const char* text)
++{
++    (void)text;
++}
++
++#endif /* CONFIG_GRAPHICS_LVGL */
 diff --git a/src/voice/audio_playback.c b/src/voice/audio_playback.c
 index 6a2089c..fa4446e 100644
 --- a/src/voice/audio_playback.c
