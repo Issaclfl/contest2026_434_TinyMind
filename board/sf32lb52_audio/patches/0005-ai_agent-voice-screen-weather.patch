@@ -27,10 +27,10 @@ index f1b6b4a..5675f0e 100644
  
    # Optional modules
 diff --git a/include/agent_config.h b/include/agent_config.h
-index 711bb6d..b61db8c 100644
+index 711bb6d..cef44f0 100644
 --- a/include/agent_config.h
 +++ b/include/agent_config.h
-@@ -380,6 +380,18 @@
+@@ -380,6 +380,22 @@
  #define AGENT_CFG_KEY_VOLC_CLUSTER "volc_cluster"
  #define AGENT_CFG_KEY_VOLC_ASR_CLUSTER "volc_asr_cluster"
  
@@ -45,6 +45,10 @@ index 711bb6d..b61db8c 100644
 +/* Minimal status screen: framebuffer and touch nodes (see agent_screen.c). */
 +#define AGENT_SCREEN_FB_DEV "/dev/lcd0"
 +#define AGENT_SCREEN_INPUT_DEV "/dev/input0"
++
++/* CJK font for the status screen: a Noto Sans SC subset (GB2312 level 1+2)
++ * shipped in the board romfs.  See board/sf32lb52_audio/tools/subset_font.py. */
++#define AGENT_SCREEN_FONT_PATH "/etc/fonts/NotoSansSC-sub.ttf"
 +
  /* Default TTS speaker and cluster */
  #define AGENT_VOICE_DEFAULT_SPEAKER "zh_male_beijingxiaoye_emo_v2_mars_bigtts"
@@ -790,10 +794,10 @@ index 7499684..7e2a3c9 100644
  
 diff --git a/src/ui/agent_screen.c b/src/ui/agent_screen.c
 new file mode 100644
-index 0000000..815f8cc
+index 0000000..cfdc0c5
 --- /dev/null
 +++ b/src/ui/agent_screen.c
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,351 @@
 +/*
 + * Copyright (C) 2026 Xiaomi Corporation
 + *
@@ -810,15 +814,25 @@ index 0000000..815f8cc
 + * limitations under the License.
 + */
 +
-+/* agent_screen.c - minimal LVGL status screen for boards without a UI stack.
++/* agent_screen.c - the board's status screen.
 + *
-+ * Bring-up mirrors apps/examples/lvgldemo: lv_init(), lv_nuttx_dsc_init() with
-+ * the framebuffer and touch device, lv_nuttx_init(), then a task that pumps
-+ * lv_timer_handler().  Text is drawn with LVGL's built-in CJK font so Chinese
-+ * renders without FreeType or a font service.
++ * A 390x450 panel (CO5300 AMOLED) showing what the device is saying: a title
++ * bar with a status dot, the announcement/reply in a rounded card, and a
++ * footer line.  Deliberately small -- no widgets, no history, nothing to
++ * fail.
 + *
-+ * Only the agent's own text goes here -- no widgets, no chat history.  It
-+ * exists so the board can show what it is saying while it says it. */
++ * Bring-up mirrors apps/examples/lvgldemo: lv_init(), lv_nuttx_dsc_init()
++ * with the framebuffer and touch nodes, lv_nuttx_init(), then a task that
++ * pumps lv_timer_handler().  It runs in its own thread for two reasons: the
++ * LCD/touch nodes are registered by a deferred board task (so they may not
++ * exist when the agent boots), and LVGL is single-threaded, so the thread
++ * that initialises it is the one that must call into it.
++ *
++ * Text is rendered with a FreeType CJK font subset shipped in the romfs
++ * (/etc/fonts/NotoSansSC-sub.ttf, GB2312 level 1+2).  LVGL's built-in
++ * lv_font_simsun_16_cjk is only a fallback: its glyph set is a thin,
++ * arbitrary subset and common characters came out as boxes.
++ */
 +
 +#include "ui/agent_screen.h"
 +
@@ -838,29 +852,171 @@ index 0000000..815f8cc
 +
 +#include <lvgl/lvgl.h>
 +
++#if LV_USE_FREETYPE
++#include <lvgl/src/libs/freetype/lv_freetype.h>
++#endif
++
 +static const char* TAG = "screen";
 +
 +#define SCREEN_TEXT_MAX 512
-+#define SCREEN_TASK_STACK 16384 /* LVGL's NuttX port asks for >= 8192 */
-+#define SCREEN_TASK_PRIO 90   /* below the audio/agent threads */
-+#define SCREEN_WAIT_MS 20000  /* how long to wait for the display to appear */
++#define SCREEN_TASK_STACK 32768 /* LVGL + FreeType want a roomy stack */
++#define SCREEN_WAIT_MS 20000    /* how long to wait for the display node */
 +
-+static lv_display_t* s_disp;
-+static lv_obj_t* s_title;
++/* Palette */
++
++#define COL_BG        0x0d0f16
++#define COL_BAR       0x161a26
++#define COL_CARD      0x1b1f2c
++#define COL_ACCENT    0x4fc3f7
++#define COL_TEXT      0xf2f4f8
++#define COL_DIM       0x8b93a7
++
++#define SCREEN_TITLE_PX 18
++#define SCREEN_BODY_PX  22
++
 +static lv_obj_t* s_body;
++static lv_obj_t* s_foot;
++static lv_font_t* s_font;      /* body font (CJK-capable) */
++static lv_font_t* s_font_sm;   /* title/footer font */
 +static pthread_t s_task;
 +static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 +static char s_pending[SCREEN_TEXT_MAX];
 +static char s_fb_path[64];
 +static char s_input_path[64];
++static char s_font_path[80];
 +static volatile bool s_has_pending;
 +static volatile bool s_running;
 +static bool s_inited;
 +
-+/* Bring-up runs in its own thread for two reasons: the LCD and touch nodes
-+ * are registered by a deferred board task, so they may not exist yet when the
-+ * agent boots; and LVGL is single-threaded, so the thread that initializes it
-+ * is also the one that must pump lv_timer_handler(). */
++/* Pick the best font available on this build, degrading loudly if needed. */
++
++static void font_setup(void)
++{
++#if LV_USE_FREETYPE
++    if (s_font_path[0] && access(s_font_path, F_OK) == 0) {
++        /* "already initialised" is not a failure: another component of the
++         * system may have brought FreeType up first, and we can still create
++         * our own font on top of it. */
++
++        lv_result_t init_res = lv_freetype_init(LV_FREETYPE_CACHE_FT_GLYPH_CNT);
++        if (init_res != LV_RESULT_OK) {
++            syslog(LOG_INFO, "[%s] lv_freetype_init: %d (continuing)\n", TAG,
++                init_res);
++        }
++
++        s_font = lv_freetype_font_create(s_font_path,
++            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, SCREEN_BODY_PX,
++            LV_FREETYPE_FONT_STYLE_NORMAL);
++        s_font_sm = lv_freetype_font_create(s_font_path,
++            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, SCREEN_TITLE_PX,
++            LV_FREETYPE_FONT_STYLE_NORMAL);
++
++        if (s_font) {
++            syslog(LOG_INFO, "[%s] FreeType font: %s (%d px)\n", TAG,
++                s_font_path, SCREEN_BODY_PX);
++        } else {
++            syslog(LOG_WARNING, "[%s] FreeType could not open %s\n", TAG,
++                s_font_path);
++        }
++    } else {
++        syslog(LOG_WARNING, "[%s] no font at %s\n", TAG, s_font_path);
++    }
++#endif
++
++#if LV_FONT_SIMSUN_16_CJK
++    if (!s_font) {
++        /* Thin glyph set: some Chinese will still come out as boxes. */
++        s_font = (lv_font_t*)&lv_font_simsun_16_cjk;
++        s_font_sm = s_font;
++        syslog(LOG_WARNING, "[%s] falling back to built-in simsun subset\n", TAG);
++    }
++#endif
++
++    if (!s_font) {
++        s_font = (lv_font_t*)&lv_font_montserrat_14;
++        s_font_sm = s_font;
++        syslog(LOG_WARNING, "[%s] falling back to montserrat: no CJK\n", TAG);
++    }
++
++    /* Anything the CJK font lacks (rare) still gets a chance.  In this LVGL
++     * version the fallback is a struct field, not a setter. */
++
++    s_font->fallback = &lv_font_montserrat_14;
++}
++
++static lv_obj_t* make_label(lv_obj_t* parent, const char* text, lv_font_t* font,
++    lv_color_t color)
++{
++    lv_obj_t* lbl = lv_label_create(parent);
++    lv_label_set_text(lbl, text);
++    lv_obj_set_style_text_font(lbl, font, 0);
++    lv_obj_set_style_text_color(lbl, color, 0);
++    return lbl;
++}
++
++static void ui_build(void)
++{
++    lv_obj_t* scr = lv_obj_create(NULL);
++    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
++    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
++    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
++    lv_obj_set_style_pad_all(scr, 0, 0);
++    lv_obj_set_style_border_width(scr, 0, 0);
++
++    /* Title bar */
++
++    lv_obj_t* bar = lv_obj_create(scr);
++    lv_obj_set_size(bar, lv_pct(100), 44);
++    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
++    lv_obj_set_style_bg_color(bar, lv_color_hex(COL_BAR), 0);
++    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
++    lv_obj_set_style_border_width(bar, 0, 0);
++    lv_obj_set_style_radius(bar, 0, 0);
++    lv_obj_set_style_pad_all(bar, 0, 0);
++    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
++
++    lv_obj_t* dot = lv_obj_create(bar);
++    lv_obj_set_size(dot, 10, 10);
++    lv_obj_align(dot, LV_ALIGN_LEFT_MID, 16, 0);
++    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_color(dot, lv_color_hex(COL_ACCENT), 0);
++    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
++    lv_obj_set_style_border_width(dot, 0, 0);
++
++    lv_obj_t* title = make_label(bar, "TinyMind", s_font_sm,
++        lv_color_hex(COL_TEXT));
++    lv_obj_align(title, LV_ALIGN_LEFT_MID, 34, 0);
++
++    /* Body card */
++
++    lv_obj_t* card = lv_obj_create(scr);
++    lv_obj_set_size(card, lv_pct(92), 300);
++    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 60);
++    lv_obj_set_style_bg_color(card, lv_color_hex(COL_CARD), 0);
++    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
++    lv_obj_set_style_radius(card, 18, 0);
++    lv_obj_set_style_border_width(card, 0, 0);
++    lv_obj_set_style_pad_all(card, 18, 0);
++    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
++
++    s_body = make_label(card, "就绪", s_font, lv_color_hex(COL_TEXT));
++    lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);
++    lv_obj_set_width(s_body, lv_pct(100));
++    lv_obj_set_style_text_align(s_body, LV_TEXT_ALIGN_CENTER, 0);
++    lv_obj_set_style_text_line_space(s_body, 6, 0);
++    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 0);
++
++    /* Footer */
++
++    s_foot = make_label(scr, "等待指令", s_font_sm, lv_color_hex(COL_DIM));
++    lv_obj_set_width(s_foot, lv_pct(92));
++    lv_obj_set_style_text_align(s_foot, LV_TEXT_ALIGN_CENTER, 0);
++    lv_obj_align(s_foot, LV_ALIGN_BOTTOM_MID, 0, -10);
++
++    lv_screen_load(scr);
++}
++
++/* Bring-up + the LVGL loop, all in one thread. */
 +
 +static void* screen_task(void* arg)
 +{
@@ -904,39 +1060,10 @@ index 0000000..815f8cc
 +        return NULL;
 +    }
 +
-+    s_disp = result.disp;
++    font_setup();
++    ui_build();
 +
-+    lv_obj_t* scr = lv_obj_create(NULL);
-+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101018), 0);
-+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-+
-+    s_title = lv_label_create(scr);
-+    lv_label_set_text(s_title, "TinyMind");
-+    lv_obj_set_style_text_color(s_title, lv_color_hex(0x7fd1ff), 0);
-+    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 12);
-+
-+    s_body = lv_label_create(scr);
-+    lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);
-+    lv_obj_set_width(s_body, lv_pct(88));
-+    lv_obj_set_style_text_color(s_body, lv_color_hex(0xf0f0f0), 0);
-+    lv_label_set_text(s_body, "就绪");
-+    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 0);
-+
-+#if LV_FONT_SIMSUN_16_CJK
-+    /* Chinese needs a CJK-capable font; the default Montserrat has no
-+     * glyphs for it and the text would come out blank. */
-+    lv_obj_set_style_text_font(s_title, &lv_font_simsun_16_cjk, 0);
-+    lv_obj_set_style_text_font(s_body, &lv_font_simsun_16_cjk, 0);
-+    syslog(LOG_INFO, "[%s] using built-in CJK font\n", TAG);
-+#else
-+    syslog(LOG_WARNING, "[%s] CJK font not built in: Chinese will not render\n",
-+        TAG);
-+#endif
-+
-+    lv_screen_load(scr);
 +    s_running = true;
-+
 +    syslog(LOG_INFO, "[%s] up: %s\n", TAG, fb ? fb : "(default)");
 +
 +    while (s_running) {
@@ -973,6 +1100,8 @@ index 0000000..815f8cc
 +    if (input_path) {
 +        strncpy(s_input_path, input_path, sizeof(s_input_path) - 1);
 +    }
++
++    strncpy(s_font_path, AGENT_SCREEN_FONT_PATH, sizeof(s_font_path) - 1);
 +
 +    pthread_attr_init(&attr);
 +    pthread_attr_setstacksize(&attr, SCREEN_TASK_STACK);
