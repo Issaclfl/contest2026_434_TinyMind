@@ -460,3 +460,48 @@ AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有 `AUDIO_MSG_COMP
 > 恰是正确版本，所以本地一直编得过。**教训：交付前必须校验"仓 vs 工作树"逐字节一致，
 > 而不是"我本地能编过"。** 已补上自动化校验脚本。
 
+### 7.9 离线语音播报与在线 TTS（2026-09-20）
+
+**定位变了**：作品要做"断网也能用的本地协同 + 语音播报"，播报就不能只有云一条路。
+于是分成两条，各司其职：
+
+| 路径 | 触发 | 依赖 | 状态（2026-09-20） |
+|---|---|---|---|
+| **离线播报** | `clip <name>`（8 条固定播报） | 无——音频随固件烧进 romfs `/etc/clips/` | ✅ 真机验证：`clip light_on` 播 40,960 字节（1.3 s）、`overruns=0`，全程无网络 |
+| **在线 TTS（任意文本）** | `say <任意文本>` | 板子能上网 + LLM key | ✅ 通路验证到网络层：请求构造/回包解析/重采样/播放全过，只差网络 |
+| **自动播报** | `say_auto on` 后 `ask` 的回复会被念出来 | 同上 | 同上（代码就绪） |
+
+**为什么离线用预合成而不是板端合成**：离线合成任意中文需要本地语音引擎（音节拼接或
+小神经 TTS），体积与工期都不是这次能覆盖的。固定播报预合成是**零依赖**的，任意文本仍走
+在线 TTS——这是有意分工，不是偷懒，也不是"假装能离线说任意话"。
+
+**在线 TTS 的实现要点**（`packages/ai_agent/src/voice/mimo_tts.c`）：
+
+- MiMo 平台的 TTS **不在 `/v1/audio/speech`**（那四个候选路径全是 404），而在
+  `/v1/chat/completions`：`{"model":"mimo-v2.5-tts","messages":[{"role":"assistant",
+  "content":"<要念的字>"}],"audio":{"format":"wav","voice":"冰糖"}}`，音频以 **base64
+  放在 `choices[0].message.audio.data`**。走文本 JSON 意味着板子现成的 TLS 客户端
+  （`vela_tls.c`）直接可用，不需要二进制响应支持。
+- 回包是 **24 kHz 单声道 16bit WAV**，本板时钟表只有 16k/48k，故在板端做 3:2
+  重采样（取一个样点 + 相邻两点取平均）落到 16 kHz，与 `voice_tts_ops_t` 约定的输出一致。
+  18 字一句话：回包约 266 KB、云端合成 2.2 s。
+
+**播放后端**：`/dev/audio0` 直接用 NuttX audio ioctl（`AUDIOIOC_CONFIGURE / GETBUFFERINFO /
+ALLOCBUFFER / ENQUEUEBUFFER / REGISTERMQ / START`），实现照 `nxplayer` 抄。
+`audio_playback.c` 按 `dev_path` 前缀分流：`/dev/...` 走设备节点，其余仍走 media_player
+（上游路径原样保留）。启动时机有讲究：**先入队两个缓冲再 START**，否则下层会先空跑半区。
+
+**顺带修掉的驱动缺陷（假 overrun）**：每条放音流收尾都报 `overruns=2`——因为
+`AUDIO_APB_FINAL` 之后排水的那两次半区服务也会去 `pendq` 取数据，取不到就计数，而那时
+数据早已全部在暂存区里。修法：排水期间不再调 `sf32lb52_serve_half()`。修完 `clip`/`beep`
+都是 `overruns=0`，这个计数器才重新可用作"上层供桶是否及时"的指标。
+
+**在线通路仍缺一环：板子没有上网手段**。今天板子上网只有两条路——原生 USB（第二根
+USB-C 线，PPP 到 PC）或 UART2 + USB-TTL / ESP32-S3 网关，**都需要物理接线**；接线到位前
+`say` 会停在 `net_connect ... ret=0x52`（无路由）。**离线播报不受此影响**。
+
+> ⚠️ **实测发现：控制台里敲 `restart` 会把控制台弄死**，与已知的 `quit` 同类
+> （回车、`help`、`ifconfig` 全无回显，软件侧救不回来）。恢复只有物理 Reset 或重新烧录
+> （sftool 会让芯片复位，实测重烧后控制台即恢复）。**演示时不要敲 `quit`，也不要敲 `restart`。**
+
+

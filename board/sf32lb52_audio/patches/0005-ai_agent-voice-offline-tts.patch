@@ -1,0 +1,1765 @@
+ai_agent 语音通路补丁：离线播报 + MiMo TTS + /dev/audio0 播放后端
+基线：packages/ai_agent @ 41723c6
+应用：git -C packages/ai_agent apply --whitespace=nowarn <本补丁>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f1b6b4a..38a7002 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -53,6 +53,7 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
+     src/tools/tool_system.c
+     src/tools/tool_health.c
+     src/tools/tool_control.c
++    src/tools/tool_board.c
+     src/tools/tool_media.c
+     src/tools/tool_proxyquickapp.c
+     src/tools/skill_loader.c
+@@ -66,6 +67,8 @@ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
+     src/voice/audio_capture.c
+     src/voice/audio_playback.c
+     src/voice/voice_channel.c
++    src/voice/mimo_tts.c
++    src/voice/voice_say.c
+     src/stubs.c
+     src/ui/qrcode_display.c
+   )
+diff --git a/include/agent_config.h b/include/agent_config.h
+index 711bb6d..b72fbc4 100644
+--- a/include/agent_config.h
++++ b/include/agent_config.h
+@@ -380,6 +380,14 @@
+ #define AGENT_CFG_KEY_VOLC_CLUSTER "volc_cluster"
+ #define AGENT_CFG_KEY_VOLC_ASR_CLUSTER "volc_asr_cluster"
+ 
++/* MiMo (Xiaomi token-plan) TTS: same credential as the chat endpoint.
++ * The voice is optional; mimo_tts.c falls back to its built-in default. */
++#define AGENT_CFG_KEY_TTS_VOICE "tts_voice"
++
++/* Playback device override for the plain NuttX audio backend.  Empty or
++ * unset means "use the board's own node if there is one" (see voice_say.c). */
++#define AGENT_CFG_KEY_AUDIO_PLAYBACK_DEV "audio_playback_dev"
++
+ /* Default TTS speaker and cluster */
+ #define AGENT_VOICE_DEFAULT_SPEAKER "zh_male_beijingxiaoye_emo_v2_mars_bigtts"
+ #define AGENT_VOICE_DEFAULT_CLUSTER "volcano_tts"
+diff --git a/include/voice/voice_say.h b/include/voice/voice_say.h
+new file mode 100644
+index 0000000..e426240
+--- /dev/null
++++ b/include/voice/voice_say.h
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Speak a UTF-8 string through the board's audio device.
++ *
++ * Pipeline: active TTS backend -> 16 kHz mono PCM -> audio_playback_write().
++ * Long text is split at punctuation so each TTS round trip stays inside the
++ * response budget; chunks are synthesized and played one after another.
++ *
++ * Returns 0 if at least one chunk was played, negative errno otherwise. */
++
++int voice_say_text(const char* text);
++
++/* Auto-speak: when enabled, the CLI channel speaks every reply it prints.
++ * Off by default -- enable with the `say_auto on` console command. */
++
++void voice_say_set_auto(int on);
++int voice_say_get_auto(void);
++
++/* Register the MiMo TTS backend and make it active.  Idempotent. */
++
++int voice_say_init(void);
++
++/* The audio device `say` plays on (config override, else the board's node). */
++
++const char* voice_say_device(void);
++
++/* Play a pre-rendered announcement from /etc/clips/<name>.pcm.
++ * No network, no TTS engine: this is the offline voice path. */
++
++int voice_say_clip(const char* name);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/agent_main.c b/src/agent_main.c
+index 9d676c2..eac9306 100644
+--- a/src/agent_main.c
++++ b/src/agent_main.c
+@@ -71,6 +71,7 @@
+ #include "tools/skill_sync.h"
+ #endif
+ #include "voice/voice_channel.h"
++#include "voice/voice_say.h"
+ #ifdef CONFIG_AI_AGENT_WEIXIN
+ #include "channels/weixin_channel.h"
+ #endif
+@@ -327,6 +328,39 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
+ static volatile bool s_voice_cooldown;
+ static time_t s_voice_cooldown_until;
+ 
++/* Speak a reply on the board's own speaker without holding up the outbound
++ * queue: TTS round trip plus real-time playback takes seconds. */
++
++static void* say_task(void* arg)
++{
++    char* text = (char*)arg;
++
++    voice_say_text(text);
++    free(text);
++    return NULL;
++}
++
++static void say_async(const char* text)
++{
++    char* copy = strdup(text);
++    pthread_t tid;
++    pthread_attr_t attr;
++
++    if (!copy) {
++        return;
++    }
++
++    pthread_attr_init(&attr);
++    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++
++    if (pthread_create(&tid, &attr, say_task, copy) != 0) {
++        syslog(LOG_ERR, "[%s] could not start say thread\n", TAG);
++        free(copy);
++    }
++
++    pthread_attr_destroy(&attr);
++}
++
+ /**
+  * Reads messages from the outbound queue and dispatches them to the
+  * appropriate channel (FeiShu, WebSocket, CLI, etc.).
+@@ -435,6 +469,12 @@ static void* outbound_dispatch_task(void* arg)
+             fflush(stdout);
+             pthread_mutex_unlock(&g_stdout_lock);
+             syslog(LOG_INFO, "[agent] [Agent]: %s\n", msg.content);
++
++            /* say_auto on: read the reply out through the speaker too. */
++
++            if (voice_say_get_auto()) {
++                say_async(msg.content);
++            }
+         } else {
+             syslog(LOG_WARNING, "[%s] Unknown channel: %s\n", TAG, msg.channel);
+         }
+diff --git a/src/channels/nsh_commands.c b/src/channels/nsh_commands.c
+index 25875b5..431ca2f 100644
+--- a/src/channels/nsh_commands.c
++++ b/src/channels/nsh_commands.c
+@@ -41,6 +41,8 @@
+ #include "tools/tool_proxyquickapp.h"
+ #include "tools/tool_registry.h"
+ #include "tools/tool_web_search.h"
++#include "voice/audio_playback.h"
++#include "voice/voice_say.h"
+ #include "agent_compat.h"
+ #include "agent_config.h"
+ 
+@@ -596,6 +598,115 @@ static void cmd_ask(int argc, char** argv)
+     syslog(LOG_INFO, "[agent] ask: %s\n", content);
+ }
+ 
++/* Speak text through the board's own audio device (TTS + /dev/audio0). */
++
++static void cmd_say(int argc, char** argv)
++{
++    char text[512] = { 0 };
++
++    if (argc < 2) {
++        printf("Usage: say <text>        speak <text> through the speaker\n");
++        printf("       say_auto on|off   speak every reply printed here\n");
++        return;
++    }
++
++    for (int i = 1; i < argc; i++) {
++        strncat(text, argv[i], sizeof(text) - strlen(text) - 1);
++        if (i < argc - 1)
++            strncat(text, " ", sizeof(text) - strlen(text) - 1);
++    }
++
++    printf("Speaking: %s\n", text);
++    int ret = voice_say_text(text);
++    if (ret != 0)
++        printf("say failed: %d\n", ret);
++}
++
++static void cmd_say_auto(int argc, char** argv)
++{
++    if (argc < 2) {
++        printf("Auto-speak is %s\n", voice_say_get_auto() ? "ON" : "OFF");
++        return;
++    }
++
++    int on = (strcmp(argv[1], "on") == 0 || strcmp(argv[1], "1") == 0);
++    voice_say_set_auto(on);
++    printf("Auto-speak %s\n", on ? "ON" : "OFF");
++}
++
++/* Offline audio check: drive the same playback path `say` uses, with a tone * generated on the spot, so the device node can be verified with no network
++ * and no TTS in the loop.  1 kHz square, 0.5 s on / 0.5 s off. */
++
++static void cmd_beep(int argc, char** argv)
++{
++    int seconds = (argc > 1) ? atoi(argv[1]) : 3;
++    const int rate = AGENT_VOICE_SAMPLE_RATE;
++    size_t frames;
++    size_t bytes;
++    short* pcm;
++    audio_playback_t* pb;
++    size_t off = 0;
++    int ret = 0;
++
++    if (seconds < 1 || seconds > 30) {
++        seconds = 3;
++    }
++
++    frames = (size_t)rate * (size_t)seconds;
++    bytes = frames * sizeof(short);
++    pcm = malloc(bytes);
++
++    if (!pcm) {
++        printf("beep: out of memory (%zu bytes)\n", bytes);
++        return;
++    }
++
++    for (size_t i = 0; i < frames; i++) {
++        unsigned int slot = (unsigned int)((i * 2) / (unsigned int)rate);
++        pcm[i] = (slot & 1) ? 0 : 9000;
++    }
++
++    printf("beep: %d s -> %s\n", seconds, voice_say_device());
++
++    pb = audio_playback_open(voice_say_device(), rate, 1, 16);
++    if (!pb) {
++        printf("beep: playback open failed\n");
++        free(pcm);
++        return;
++    }
++
++    while (off < bytes) {
++        ret = audio_playback_write(pb, (const char*)pcm + off, bytes - off);
++        if (ret <= 0) {
++            printf("beep: write failed: %d\n", ret);
++            break;
++        }
++
++        off += (size_t)ret;
++    }
++
++    audio_playback_close(pb);
++    free(pcm);
++    printf("beep: done (%zu bytes)\n", off);
++}
++
++/* Offline announcements: audio shipped in the image, played from /etc/clips.
++ * No network, no TTS engine -- this is what keeps the device talking when the
++ * cloud is gone. */
++
++static void cmd_clip(int argc, char** argv)
++{
++    if (argc < 2) {
++        printf("Usage: clip <name>   (offline announcement from /etc/clips)\n");
++        printf("  light_on  light_off  red_on  blue_on  ok  offline  unknown  temp_high\n");
++        return;
++    }
++
++    int ret = voice_say_clip(argv[1]);
++    if (ret != 0)
++        printf("clip failed: %d\n", ret);
++}
++
+ static void cmd_cron_start(void)
+ {
+     if (cron_service_start() == OK) {
+@@ -975,6 +1086,14 @@ static void* cli_thread(void* arg)
+             cmd_heartbeat_trigger();
+         else if (strcmp(cmd, "ask") == 0)
+             cmd_ask(argc, argv);
++        else if (strcmp(cmd, "say") == 0)
++            cmd_say(argc, argv);
++        else if (strcmp(cmd, "say_auto") == 0)
++            cmd_say_auto(argc, argv);
++        else if (strcmp(cmd, "beep") == 0)
++            cmd_beep(argc, argv);
++        else if (strcmp(cmd, "clip") == 0)
++            cmd_clip(argc, argv);
+         else if (strcmp(cmd, "cron_start") == 0)
+             cmd_cron_start();
+ #ifdef CONFIG_AI_AGENT_NODE
+diff --git a/src/core/agent_loop.c b/src/core/agent_loop.c
+index 3d9dec3..0890eeb 100644
+--- a/src/core/agent_loop.c
++++ b/src/core/agent_loop.c
+@@ -662,7 +662,7 @@ static char* handle_slash_remind(const agent_msg_t* msg)
+     char* reply = calloc(1, 512);
+     if (reply) {
+         tool_registry_execute("cron_add", input, reply, 512);
+-        snprintf(reply, 512, "好的，%d 秒后提醒你：%s",
++        snprintf(reply, 512, "好的，%d 秒后提醒你：%.440s",
+             secs, remind_msg);
+     }
+     return reply;
+diff --git a/src/tools/skill_loader.c b/src/tools/skill_loader.c
+index ea21931..3cb9835 100644
+--- a/src/tools/skill_loader.c
++++ b/src/tools/skill_loader.c
+@@ -36,22 +36,32 @@ static const char *TAG = "skills";
+ #define BUILTIN_WEATHER \
+     "# Weather\n" \
+     "\n" \
+-    "Get current weather and forecasts using web_search.\n" \
++    "Get real current weather and today's range from wttr.in (no API key).\n" \
+     "\n" \
+     "## When to use\n" \
+     "When the user asks about weather, temperature, or forecasts.\n" \
++    "触发词：天气、温度、下雨、weather、forecast。\n" \
+     "\n" \
+     "## How to use\n" \
+-    "1. Use get_current_time to know the current date\n" \
+-    "2. Use web_search with a query like \"weather in [city] today\"\n" \
+-    "3. Extract temperature, conditions, and forecast from results\n" \
+-    "4. Present in a concise, friendly format\n" \
++    "1. fetch_url with the wttr.in JSON endpoint:\n" \
++    "   - city known: https://wttr.in/<City>?format=j1 (e.g. https://wttr.in/Beijing?format=j1)\n" \
++    "   - no city given: https://wttr.in/?format=j1 -- it resolves the city from the egress IP\n" \
++    "2. Read from the returned JSON:\n" \
++    "   - nearest_area[0].areaName[0].value -> the city actually used\n" \
++    "   - current_condition[0].temp_C / humidity / windspeedKmph / weatherDesc[0].value\n" \
++    "   - weather[0].maxtempC / mintempC -> today's high / low\n" \
++    "3. Answer in the user's language, one or two short sentences, city name first.\n" \
++    "   Translate the condition yourself (\"Smoky haze\" -> 烟霾).\n" \
++    "\n" \
++    "## Rules\n" \
++    "- Try fetch_url first; do not claim you cannot get real-time weather.\n" \
++    "- Never invent weather. If fetch_url fails, say the lookup failed.\n" \
++    "- Keep it under about 60 characters: the reply may be spoken through the speaker.\n" \
+     "\n" \
+     "## Example\n" \
+-    "User: \"What's the weather in Tokyo?\"\n" \
+-    "→ get_current_time\n" \
+-    "→ web_search \"weather Tokyo today February 2026\"\n" \
+-    "→ \"Tokyo: 8°C, partly cloudy. High 12°C, low 4°C. Light wind from the north.\"\n"
++    "User: \"北京今天天气怎么样\"\n" \
++    "→ fetch_url https://wttr.in/Beijing?format=j1\n" \
++    "→ \"北京今天23度，烟霾，湿度66%，最高29度最低21度，出门建议戴口罩。\"\n"
+ 
+ #define BUILTIN_DAILY_BRIEFING \
+     "# Daily Briefing\n" \
+@@ -446,5 +456,5 @@ void skill_loader_refresh(void)
+     /* Invalidate tool registry so next get_tools_json rebuilds */
+     tool_registry_invalidate();
+     syslog(LOG_INFO, "[%s] Skills refreshed (hash=%08x)\n",
+-        TAG, s_last_skill_hash);
++        TAG, (unsigned)s_last_skill_hash);
+ }
+diff --git a/src/tools/tool_registry.c b/src/tools/tool_registry.c
+index 33583e7..97b4822 100644
+--- a/src/tools/tool_registry.c
++++ b/src/tools/tool_registry.c
+@@ -27,6 +27,7 @@
+ #endif
+ #include "tools/tool_guard.h"
+ #include "tools/tool_control.h"
++#include "tools/tool_board.h"
+ #include "tools/tool_cron.h"
+ #include "tools/tool_feishu_chat.h"
+ #include "tools/tool_feishu_doc.h"
+@@ -368,6 +369,27 @@ int tool_registry_init(void)
+             TOOL_SCHEMA_END(),
+         tool_vibrate_execute);
+ 
++    /* Board tools.  Every other tool either talks to the network or pokes at
++     * files; these two are wired to hardware the agent is sitting on -- a PWM
++     * output driving the LCD backlight and a GPIO input reading the keys. */
++
++    REGISTER_TOOL(
++        "set_backlight",
++        "Set the LCD backlight brightness as a percentage: 0 turns it off, "
++        "100 is brightest. Use this when the user asks to dim, brighten or "
++        "turn off the screen.",
++        TOOL_SCHEMA_BEGIN()
++            TOOL_PARAM_NUM("level", "Brightness 0-100")
++            TOOL_SCHEMA_END_REQUIRED("\"level\""),
++        tool_set_backlight_execute);
++
++    REGISTER_TOOL_NO_PARAMS(
++        "read_buttons",
++        "Read the board's physical keys. Reports whether the key is being "
++        "held down right now. Use this when the user asks about the buttons "
++        "or wants to know if one is pressed.",
++        tool_read_buttons_execute);
++
+     /* Feishu document tools */
+     REGISTER_TOOL(
+         "feishu_doc_create",
+@@ -526,6 +548,15 @@ void tool_registry_cleanup(void)
+     free(s_tools_json);
+     s_tools_json = NULL;
+     s_tool_count = 0;
++
++    /* Mark the cache dirty again.  Without this, a second run of the agent in
++     * the same boot re-registers every tool but build_tools_json_locked()
++     * early-returns (the dirty flag was cleared by the first build), leaving
++     * s_tools_json NULL -- so the model is sent a request with no tools at
++     * all.  The first run after a boot works; every later one silently loses
++     * the whole toolset. */
++
++    s_tools_dirty = true;
+     pthread_mutex_unlock(&s_tools_mtx);
+ }
+ 
+diff --git a/src/voice/audio_playback.c b/src/voice/audio_playback.c
+index 6a2089c..fa4446e 100644
+--- a/src/voice/audio_playback.c
++++ b/src/voice/audio_playback.c
+@@ -14,37 +14,419 @@
+  * limitations under the License.
+  */
+ 
+-/* audio_playback.c - Streaming audio playback via media_player buffer mode. */
++/* audio_playback.c - Streaming audio playback.
++ *
++ * Two backends behind the one interface in audio_playback.h:
++ *
++ *   - media_player (Vela media framework, buffer mode): used when dev_path
++ *     is NULL or does not name a device node.  Unchanged upstream behaviour.
++ *
++ *   - A plain NuttX audio device (dev_path begins with "/dev/"): opens the
++ *     device, configures it with AUDIOIOC_CONFIGURE and streams through
++ *     AUDIOIOC_ALLOCBUFFER / AUDIOIOC_ENQUEUEBUFFER.  This is what a board
++ *     whose audio support is an ordinary NuttX lower-half needs -- on such a
++ *     board media_player() is a weak stub (see src/stubs.c) and the upstream
++ *     path cannot produce sound at all.
++ *
++ * The NuttX path mirrors apps/system/nxplayer's playthread, which is the
++ * reference implementation for this device class.
++ */
+ 
+ #include "voice/audio_playback.h"
+ #include "agent_config.h"
+ 
++#include <nuttx/config.h>
++
+ #include <errno.h>
++#include <fcntl.h>
+ #include <media_player.h>
++#include <mqueue.h>
++#include <stdbool.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/ioctl.h>
+ #include <syslog.h>
++#include <time.h>
+ #include <unistd.h>
+ 
++#include <nuttx/audio/audio.h>
++
+ static const char* TAG = "audio_pb";
+ 
+ #define PB_OPTIONS_LEN 128
+ 
++/* Upper bound on buffers we pull from the driver.  The driver decides the
++ * real number through AUDIOIOC_GETBUFFERINFO; this only sizes our arrays. */
++
++#define PB_MAX_BUFFERS 8
++
++/* How long close() waits for AUDIO_MSG_COMPLETE after the final buffer. */
++
++#define PB_COMPLETE_TIMEOUT_MS 5000
++
+ static void* s_active_player;
+ 
+ struct audio_playback {
+-    void* player;
++    /* common */
+     size_t total_written;
+     int bytes_per_frame;
+     volatile int stopped;
++
++    /* media_player backend */
++    void* player;
++
++    /* NuttX audio device backend */
++    bool pcmdev;
++    int fd;
++    mqd_t mq;
++    char mqname[24];
++    struct ap_buffer_s* buffers[PB_MAX_BUFFERS];
++    struct ap_buffer_s* free_list[PB_MAX_BUFFERS];
++    int nbuffers;
++    int free_n;
++    int buffer_size;
++    unsigned char* acc; /* accumulation buffer, buffer_size bytes */
++    size_t acc_len;
++    int enqueued;
++    bool started;
++    bool complete;
+ };
+ 
++/* ------------------------------------------------------------------ */
++/* NuttX audio device backend                                          */
++/* ------------------------------------------------------------------ */
++
++static void pcmdev_reclaim(struct audio_playback* pb, struct audio_msg_s* msg)
++{
++    if (msg->msg_id == AUDIO_MSG_DEQUEUE) {
++        if (msg->u.ptr && pb->free_n < pb->nbuffers) {
++            pb->free_list[pb->free_n++] = msg->u.ptr;
++        }
++    } else if (msg->msg_id == AUDIO_MSG_COMPLETE) {
++        pb->complete = true;
++    }
++}
++
++/* Wait for one dequeued buffer.  Returns OK, or -EPIPE once the driver has
++ * reported COMPLETE (nothing else is coming). */
++
++static int pcmdev_wait_buffer(struct audio_playback* pb)
++{
++    struct audio_msg_s msg;
++    unsigned int prio;
++
++    while (pb->free_n == 0) {
++        ssize_t n = mq_receive(pb->mq, (char*)&msg, sizeof(msg), &prio);
++        if (n != sizeof(msg)) {
++            if (errno == EINTR) {
++                continue;
++            }
++
++            syslog(LOG_ERR, "[%s] mq_receive failed: %d\n", TAG, errno);
++            return -EIO;
++        }
++
++        pcmdev_reclaim(pb, &msg);
++        if (pb->complete && pb->free_n == 0) {
++            return -EPIPE;
++        }
++    }
++
++    return OK;
++}
++
++/* Copy whatever sits in the accumulation buffer into a driver buffer and
++ * enqueue it.  With final set the buffer carries AUDIO_APB_FINAL, which is
++ * what makes the lower half deliver AUDIO_CALLBACK_COMPLETE (and, on boards
++ * that need it, drain the last DMA half). */
++
++static int pcmdev_enqueue(struct audio_playback* pb, bool final)
++{
++    struct audio_buf_desc_s bufdesc;
++    struct ap_buffer_s* apb;
++    int ret;
++
++    if (pb->acc_len == 0 && !final) {
++        return OK;
++    }
++
++    ret = pcmdev_wait_buffer(pb);
++    if (ret < 0) {
++        return ret;
++    }
++
++    apb = pb->free_list[--pb->free_n];
++    apb->curbyte = 0;
++    apb->nbytes = pb->acc_len;
++    apb->flags = final ? AUDIO_APB_FINAL : 0;
++
++    if (pb->acc_len > 0) {
++        memcpy(apb->samp, pb->acc, pb->acc_len);
++    }
++
++    pb->acc_len = 0;
++
++    bufdesc.numbytes = apb->nbytes;
++    bufdesc.u.buffer = apb;
++
++    ret = ioctl(pb->fd, AUDIOIOC_ENQUEUEBUFFER, (unsigned long)&bufdesc);
++    if (ret < 0) {
++        syslog(LOG_ERR, "[%s] enqueue failed: %d\n", TAG, errno);
++        pb->free_list[pb->free_n++] = apb;
++        return -EIO;
++    }
++
++    pb->total_written += apb->nbytes;
++    pb->enqueued++;
++
++    /* Start once the lower half's staging can be filled outright (two
++     * buffers, or whatever the driver asked for), or on the final buffer for
++     * clips shorter than that.  Starting earlier makes the driver serve a
++     * half with nothing queued and count an underrun -- audible as a clipped
++     * first syllable. */
++
++    if (!pb->started && (pb->enqueued >= 2 || final)) {
++        ret = ioctl(pb->fd, AUDIOIOC_START, 0);
++        if (ret < 0) {
++            syslog(LOG_ERR, "[%s] start failed: %d\n", TAG, errno);
++            return -EIO;
++        }
++
++        pb->started = true;
++    }
++
++    return OK;
++}
++
++static int pcmdev_write(struct audio_playback* pb, const void* buf, size_t len)
++{
++    const unsigned char* src = buf;
++    size_t left = len;
++
++    while (left > 0) {
++        size_t room = (size_t)pb->buffer_size - pb->acc_len;
++        size_t take = left < room ? left : room;
++
++        memcpy(pb->acc + pb->acc_len, src, take);
++        pb->acc_len += take;
++        src += take;
++        left -= take;
++
++        if (pb->acc_len == (size_t)pb->buffer_size) {
++            int ret = pcmdev_enqueue(pb, false);
++            if (ret < 0) {
++                return ret;
++            }
++        }
++    }
++
++    return (int)len;
++}
++
++static void pcmdev_close(struct audio_playback* pb)
++{
++    struct audio_buf_desc_s bufdesc;
++    struct timespec ts;
++    struct audio_msg_s msg;
++    unsigned int prio;
++    int i;
++    int left_ms = PB_COMPLETE_TIMEOUT_MS;
++
++    if (pb->fd < 0) {
++        return;
++    }
++
++    /* Push the tail (even if empty) so the driver sees AUDIO_APB_FINAL and
++     * can close the stream out. */
++
++    if (pb->started && !pb->complete) {
++        int ret = pcmdev_enqueue(pb, true);
++        if (ret < 0) {
++            syslog(LOG_WARNING, "[%s] final enqueue: %d\n", TAG, ret);
++        }
++    }
++
++    /* Recover buffers until COMPLETE or timeout.  A timeout is not fatal:
++     * the point is to give the driver a chance to finish, not to hang. */
++
++    while (pb->started && !pb->complete && left_ms > 0) {
++        clock_gettime(CLOCK_REALTIME, &ts);
++        ts.tv_sec += 1;
++
++        ssize_t n = mq_timedreceive(pb->mq, (char*)&msg, sizeof(msg), &prio,
++            &ts);
++        if (n != sizeof(msg)) {
++            if (errno == ETIMEDOUT) {
++                left_ms -= 1000;
++                continue;
++            }
++
++            if (errno == EINTR) {
++                continue;
++            }
++
++            break;
++        }
++
++        pcmdev_reclaim(pb, &msg);
++    }
++
++    if (pb->started) {
++        ioctl(pb->fd, AUDIOIOC_STOP, 0);
++    }
++
++    syslog(LOG_INFO, "[%s] closing (%zu bytes written, complete=%d)\n", TAG,
++        pb->total_written, pb->complete ? 1 : 0);
++
++    ioctl(pb->fd, AUDIOIOC_UNREGISTERMQ, (unsigned long)pb->mq);
++    ioctl(pb->fd, AUDIOIOC_RELEASE, 0);
++
++    for (i = 0; i < pb->nbuffers; i++) {
++        if (pb->buffers[i]) {
++            bufdesc.numbytes = pb->buffer_size;
++            bufdesc.u.buffer = pb->buffers[i];
++            ioctl(pb->fd, AUDIOIOC_FREEBUFFER, (unsigned long)&bufdesc);
++            pb->buffers[i] = NULL;
++        }
++    }
++
++    close(pb->fd);
++    pb->fd = -1;
++
++    if (pb->mq != (mqd_t)-1) {
++        mq_close(pb->mq);
++        mq_unlink(pb->mqname);
++        pb->mq = (mqd_t)-1;
++    }
++
++    if (pb->acc) {
++        free(pb->acc);
++        pb->acc = NULL;
++    }
++}
++
++static audio_playback_t* pcmdev_open(const char* dev_path,
++    unsigned int sample_rate, unsigned int channels,
++    unsigned int bits_per_sample)
++{
++    struct audio_caps_desc_s cap_desc;
++    struct ap_buffer_info_s buf_info;
++    struct audio_buf_desc_s bufdesc;
++    struct mq_attr attr;
++    audio_playback_t* pb;
++    int i;
++    int ret;
++
++    pb = calloc(1, sizeof(*pb));
++    if (!pb) {
++        return NULL;
++    }
++
++    pb->pcmdev = true;
++    pb->fd = -1;
++    pb->mq = (mqd_t)-1;
++    pb->bytes_per_frame = (bits_per_sample / 8) * channels;
++
++    pb->fd = open(dev_path, O_RDWR | O_CLOEXEC);
++    if (pb->fd < 0) {
++        syslog(LOG_ERR, "[%s] open(%s) failed: %d\n", TAG, dev_path, errno);
++        free(pb);
++        return NULL;
++    }
++
++    memset(&cap_desc, 0, sizeof(cap_desc));
++    cap_desc.caps.ac_len = sizeof(struct audio_caps_s);
++    cap_desc.caps.ac_type = AUDIO_TYPE_OUTPUT;
++    cap_desc.caps.ac_channels = channels;
++    cap_desc.caps.ac_chmap = 0;
++    cap_desc.caps.ac_controls.hw[0] = sample_rate;
++    cap_desc.caps.ac_controls.b[3] = sample_rate >> 16;
++    cap_desc.caps.ac_controls.b[2] = bits_per_sample;
++    cap_desc.caps.ac_subtype = AUDIO_FMT_PCM;
++
++    ret = ioctl(pb->fd, AUDIOIOC_CONFIGURE, (unsigned long)&cap_desc);
++    if (ret < 0) {
++        syslog(LOG_ERR, "[%s] configure(%uHz %uch %ubit) failed: %d\n", TAG,
++            sample_rate, channels, bits_per_sample, errno);
++        goto err;
++    }
++
++    memset(&buf_info, 0, sizeof(buf_info));
++    if (ioctl(pb->fd, AUDIOIOC_GETBUFFERINFO, (unsigned long)&buf_info) < 0) {
++        buf_info.buffer_size = CONFIG_AUDIO_BUFFER_NUMBYTES;
++        buf_info.nbuffers = CONFIG_AUDIO_NUM_BUFFERS;
++    }
++
++    if (buf_info.nbuffers > PB_MAX_BUFFERS) {
++        buf_info.nbuffers = PB_MAX_BUFFERS;
++    }
++
++    pb->nbuffers = buf_info.nbuffers;
++    pb->buffer_size = buf_info.buffer_size;
++
++    for (i = 0; i < pb->nbuffers; i++) {
++        bufdesc.numbytes = pb->buffer_size;
++        bufdesc.u.pbuffer = &pb->buffers[i];
++        if (ioctl(pb->fd, AUDIOIOC_ALLOCBUFFER, (unsigned long)&bufdesc)
++            != sizeof(bufdesc)) {
++            syslog(LOG_ERR, "[%s] alloc buffer %d failed\n", TAG, i);
++            goto err;
++        }
++
++        /* Everything starts out free. */
++
++        pb->free_list[pb->free_n++] = pb->buffers[i];
++    }
++
++    pb->acc = malloc(pb->buffer_size);
++    if (!pb->acc) {
++        goto err;
++    }
++
++    pb->acc_len = 0;
++
++    attr.mq_maxmsg = pb->nbuffers + 8;
++    attr.mq_msgsize = sizeof(struct audio_msg_s);
++    attr.mq_curmsgs = 0;
++    attr.mq_flags = 0;
++
++    snprintf(pb->mqname, sizeof(pb->mqname), "/tmp/apb%0lx",
++        (unsigned long)((uintptr_t)pb));
++
++    pb->mq = mq_open(pb->mqname, O_RDWR | O_CREAT, 0644, &attr);
++    if (pb->mq == (mqd_t)-1) {
++        syslog(LOG_ERR, "[%s] mq_open failed: %d\n", TAG, errno);
++        goto err;
++    }
++
++    ioctl(pb->fd, AUDIOIOC_REGISTERMQ, (unsigned long)pb->mq);
++
++    /* The device is started by the first enqueue, not here: see
++     * pcmdev_enqueue(). */
++
++    syslog(LOG_INFO, "[%s] opened %s (%uHz %uch %ubit, %d x %d B)\n", TAG,
++        dev_path, sample_rate, channels, bits_per_sample, pb->nbuffers,
++        pb->buffer_size);
++    return pb;
++
++err:
++    pcmdev_close(pb);
++    free(pb);
++    return NULL;
++}
++
++/* ------------------------------------------------------------------ */
++/* Public interface                                                    */
++/* ------------------------------------------------------------------ */
++
+ audio_playback_t* audio_playback_open(const char* dev_path,
+     unsigned int sample_rate, unsigned int channels,
+     unsigned int bits_per_sample)
+ {
+-    (void)dev_path;
++    if (dev_path && strncmp(dev_path, "/dev/", 5) == 0) {
++        return pcmdev_open(dev_path, sample_rate, channels, bits_per_sample);
++    }
+ 
+     if (s_active_player) {
+         syslog(LOG_WARNING, "[%s] force closing stale player\n", TAG);
+@@ -87,6 +469,8 @@ audio_playback_t* audio_playback_open(const char* dev_path,
+     }
+ 
+     pb->player = player;
++    pb->fd = -1;
++    pb->mq = (mqd_t)-1;
+     pb->bytes_per_frame = (bits_per_sample / 8) * channels;
+     s_active_player = player;
+ 
+@@ -97,7 +481,7 @@ audio_playback_t* audio_playback_open(const char* dev_path,
+ 
+ int audio_playback_write(audio_playback_t* pb, const void* buf, size_t len)
+ {
+-    if (!pb || !pb->player || !buf || len == 0) {
++    if (!pb || !buf || len == 0) {
+         return -EINVAL;
+     }
+ 
+@@ -105,6 +489,14 @@ int audio_playback_write(audio_playback_t* pb, const void* buf, size_t len)
+         return -ECANCELED;
+     }
+ 
++    if (pb->pcmdev) {
++        return pcmdev_write(pb, buf, len);
++    }
++
++    if (!pb->player) {
++        return -EINVAL;
++    }
++
+     ssize_t n = media_player_write_data(pb->player, buf, len);
+     if (n > 0) {
+         pb->total_written += (size_t)n;
+@@ -117,7 +509,12 @@ void audio_playback_stop(audio_playback_t* pb)
+ {
+     if (pb) {
+         pb->stopped = 1;
+-        if (pb->player) {
++
++        if (pb->pcmdev) {
++            if (pb->fd >= 0) {
++                ioctl(pb->fd, AUDIOIOC_STOP, 0);
++            }
++        } else if (pb->player) {
+             media_player_stop(pb->player);
+         }
+     }
+@@ -129,6 +526,12 @@ void audio_playback_close(audio_playback_t* pb)
+         return;
+     }
+ 
++    if (pb->pcmdev) {
++        pcmdev_close(pb);
++        free(pb);
++        return;
++    }
++
+     if (pb->player) {
+         syslog(LOG_INFO, "[%s] closing (%zu bytes written)\n",
+             TAG, pb->total_written);
+diff --git a/src/voice/mimo_tts.c b/src/voice/mimo_tts.c
+new file mode 100644
+index 0000000..6c2d513
+--- /dev/null
++++ b/src/voice/mimo_tts.c
+@@ -0,0 +1,409 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/* mimo_tts.c - TTS backend for the Xiaomi MiMo OpenAI-compatible endpoint.
++ *
++ * The MiMo platform does not expose /v1/audio/speech.  Its TTS models are
++ * reached through the ordinary chat route:
++ *
++ *   POST /v1/chat/completions
++ *   {"model":"mimo-v2.5-tts",
++ *    "messages":[{"role":"assistant","content":"<text to speak>"}],
++ *    "audio":{"format":"wav","voice":"<voice>"}}
++ *
++ * The audio comes back as base64 inside choices[0].message.audio.data, i.e.
++ * as text, which the board's TLS client (vela_https_request) can carry
++ * without any binary-response support.  The payload is a 24 kHz mono 16-bit
++ * WAV; this backend decodes it and resamples to the 16 kHz mono 16-bit PCM
++ * that the voice channel contract (include/voice/voice_tts.h) specifies --
++ * 16 kHz is also one of the two rates this board's audio clock table has.
++ *
++ * Credentials: reuses the LLM API key from the config store (set_llm), which
++ * is the same token-plan credential the chat endpoint accepts.
++ */
++
++#include "voice/voice_tts.h"
++#include "agent_compat.h"
++#include "agent_config.h"
++#include "infra/config_store.h"
++#include "infra/vela_tls.h"
++
++#include <errno.h>
++#include <mbedtls/base64.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++
++static const char* TAG = "mimo_tts";
++
++#define MIMO_TTS_HOST "token-plan-cn.xiaomimimo.com"
++#define MIMO_TTS_PORT "443"
++#define MIMO_TTS_PATH "/v1/chat/completions"
++#define MIMO_TTS_MODEL "mimo-v2.5-tts"
++#define MIMO_TTS_DEFAULT_VOICE "冰糖"
++
++/* Response budget.  The JSON holds base64 of a 24 kHz WAV, so 768 KB of
++ * response covers roughly 12 s of speech; callers that need more split the
++ * text and call again (see voice_say_text in nsh_commands.c). */
++
++#define MIMO_TTS_RESP_CAP (768 * 1024)
++
++/* The contract output is 16 kHz; the WAV comes at 24 kHz. */
++
++#define MIMO_TTS_OUT_RATE 16000
++
++static char s_api_key[192];
++static char s_voice[64];
++
++/* ------------------------------------------------------------------ */
++
++static int mimo_tts_init(void)
++{
++    memset(s_api_key, 0, sizeof(s_api_key));
++    memset(s_voice, 0, sizeof(s_voice));
++
++    claw_config_get(AGENT_CFG_KEY_API_KEY, s_api_key, sizeof(s_api_key));
++
++    if (claw_config_get(AGENT_CFG_KEY_TTS_VOICE, s_voice, sizeof(s_voice))
++            != OK
++        || s_voice[0] == '\0') {
++        strncpy(s_voice, MIMO_TTS_DEFAULT_VOICE, sizeof(s_voice) - 1);
++    }
++
++    syslog(LOG_INFO, "[%s] init: key=%s voice=%s\n", TAG,
++        s_api_key[0] ? "set" : "MISSING", s_voice);
++    return 0;
++}
++
++/* Whether the backend has what it needs to synthesize. */
++
++int mimo_tts_ready(void)
++{
++    if (!s_api_key[0]) {
++        mimo_tts_init();
++    }
++
++    return s_api_key[0] != '\0';
++}
++
++/* ------------------------------------------------------------------ */
++/* Request building                                                    */
++/* ------------------------------------------------------------------ */
++
++static char* json_escape(const char* src)
++{
++    size_t n = 0;
++    char* out;
++
++    for (const char* p = src; *p; p++) {
++        n += (*p == '"' || *p == '\\') ? 2 : 1;
++    }
++
++    out = malloc(n + 1);
++    if (!out) {
++        return NULL;
++    }
++
++    char* q = out;
++    for (const char* p = src; *p; p++) {
++        if (*p == '"' || *p == '\\') {
++            *q++ = '\\';
++        }
++
++        *q++ = *p;
++    }
++
++    *q = '\0';
++    return out;
++}
++
++static char* build_body(const char* text, const char* voice)
++{
++    char* esc = json_escape(text);
++    char* body;
++    size_t cap;
++
++    if (!esc) {
++        return NULL;
++    }
++
++    cap = strlen(esc) + strlen(voice) + 256;
++    body = malloc(cap);
++    if (body) {
++        snprintf(body, cap,
++            "{\"model\":\"%s\",\"messages\":[{\"role\":\"assistant\","
++            "\"content\":\"%s\"}],\"audio\":{\"format\":\"wav\","
++            "\"voice\":\"%s\"}}",
++            MIMO_TTS_MODEL, esc, voice);
++    }
++
++    free(esc);
++    return body;
++}
++
++/* ------------------------------------------------------------------ */
++/* Response parsing                                                    */
++/* ------------------------------------------------------------------ */
++
++/* Locate the base64 payload in choices[0].message.audio.data without
++ * building a full cJSON tree: the string can be several hundred KB and we
++ * only need one field out of it. */
++
++static const char* find_audio_b64(const char* resp, size_t* b64_len)
++{
++    const char* audio = strstr(resp, "\"audio\"");
++    const char* data;
++    const char* end;
++
++    if (!audio) {
++        return NULL;
++    }
++
++    data = strstr(audio, "\"data\":\"");
++    if (!data) {
++        return NULL;
++    }
++
++    data += strlen("\"data\":\"");
++
++    /* base64 never contains a quote, so the next quote terminates it. */
++
++    end = strchr(data, '"');
++    if (!end || end == data) {
++        return NULL;
++    }
++
++    *b64_len = (size_t)(end - data);
++    return data;
++}
++
++struct wav_info {
++    unsigned int rate;
++    unsigned int channels;
++    unsigned int bits;
++    const unsigned char* pcm;
++    size_t pcm_len;
++};
++
++static bool parse_wav(const unsigned char* buf, size_t len, struct wav_info* out)
++{
++    size_t pos = 12; /* skip "RIFF" + size + "WAVE" */
++
++    memset(out, 0, sizeof(*out));
++
++    if (len < 44 || memcmp(buf, "RIFF", 4) != 0 || memcmp(buf + 8, "WAVE", 4)) {
++        return false;
++    }
++
++    while (pos + 8 <= len) {
++        const unsigned char* id = buf + pos;
++        unsigned int size = (unsigned int)buf[pos + 4]
++            | ((unsigned int)buf[pos + 5] << 8)
++            | ((unsigned int)buf[pos + 6] << 16)
++            | ((unsigned int)buf[pos + 7] << 24);
++        const unsigned char* body = buf + pos + 8;
++
++        if (memcmp(id, "fmt ", 4) == 0 && size >= 16 && pos + 8 + 16 <= len) {
++            out->channels = (unsigned int)body[2] | ((unsigned int)body[3] << 8);
++            out->rate = (unsigned int)body[4] | ((unsigned int)body[5] << 8)
++                | ((unsigned int)body[6] << 16)
++                | ((unsigned int)body[7] << 24);
++            out->bits = (unsigned int)body[14] | ((unsigned int)body[15] << 8);
++        } else if (memcmp(id, "data", 4) == 0) {
++            size_t avail = len - (pos + 8);
++            out->pcm = body;
++            out->pcm_len = size < avail ? size : avail;
++            break;
++        }
++
++        pos += 8 + size + (size & 1); /* chunks are word aligned */
++    }
++
++    return out->pcm != NULL && out->rate > 0 && out->channels > 0;
++}
++
++/* 24 kHz -> 16 kHz, mono, 16-bit.  Ratio 3:2, taking one sample as-is and
++ * averaging the next pair -- a cheap low-pass that keeps speech clean enough
++ * while the board's audio clock table stays on its 16 kHz row. */
++
++static size_t resample_3to2(const short* in, size_t in_frames, short* out,
++    size_t out_cap)
++{
++    size_t out_frames = (in_frames * 2) / 3;
++    size_t k;
++
++    if (out_frames > out_cap) {
++        out_frames = out_cap;
++    }
++
++    for (k = 0; k < out_frames; k++) {
++        size_t pair = k / 2;
++        size_t idx = pair * 3;
++
++        if ((k & 1) == 0) {
++            out[k] = in[idx];
++        } else {
++            int a = in[idx + 1];
++            int b = (idx + 2 < in_frames) ? in[idx + 2] : a;
++            out[k] = (short)((a + b) / 2);
++        }
++    }
++
++    return out_frames;
++}
++
++/* ------------------------------------------------------------------ */
++/* Synthesize                                                          */
++/* ------------------------------------------------------------------ */
++
++static int mimo_tts_synthesize(const char* text, unsigned char* pcm_out,
++    size_t pcm_cap, size_t* pcm_len)
++{
++    char* body = NULL;
++    char* resp = NULL;
++    unsigned char* wav = NULL;
++    const char* b64;
++    size_t b64_len = 0;
++    size_t wav_len = 0;
++    size_t wav_cap;
++    struct wav_info info;
++    size_t frames;
++    size_t out_frames;
++    int status;
++    int ret = -EIO;
++
++    if (!text || !text[0] || !pcm_out || !pcm_len) {
++        return -EINVAL;
++    }
++
++    *pcm_len = 0;
++
++    if (!s_api_key[0]) {
++        mimo_tts_init();
++    }
++
++    if (!s_api_key[0]) {
++        syslog(LOG_ERR, "[%s] no API key (run: set_llm <url> <key> <model>)\n",
++            TAG);
++        return -EACCES;
++    }
++
++    body = build_body(text, s_voice);
++    resp = malloc(MIMO_TTS_RESP_CAP);
++
++    if (!body || !resp) {
++        ret = -ENOMEM;
++        goto out;
++    }
++
++    vela_header_t auth[2];
++    memset(auth, 0, sizeof(auth));
++    auth[0].name = "Authorization";
++    static char auth_value[256];
++    snprintf(auth_value, sizeof(auth_value), "Bearer %s", s_api_key);
++    auth[0].value = auth_value;
++
++    status = vela_https_request(MIMO_TTS_HOST, MIMO_TTS_PORT, "POST",
++        MIMO_TTS_PATH, auth, body, strlen(body), resp, MIMO_TTS_RESP_CAP, NULL);
++
++    if (status != 200) {
++        syslog(LOG_ERR, "[%s] HTTP %d: %.120s\n", TAG, status, resp);
++        ret = -EIO;
++        goto out;
++    }
++
++    b64 = find_audio_b64(resp, &b64_len);
++    if (!b64) {
++        syslog(LOG_ERR, "[%s] no audio.data in response (%.80s)\n", TAG, resp);
++        ret = -EIO;
++        goto out;
++    }
++
++    /* Decoded size is at most 3/4 of the base64 length. */
++
++    wav_cap = (b64_len / 4) * 3 + 4;
++    wav = malloc(wav_cap);
++    if (!wav) {
++        ret = -ENOMEM;
++        goto out;
++    }
++
++    if (mbedtls_base64_decode(wav, wav_cap, &wav_len,
++            (const unsigned char*)b64, b64_len)
++        != 0) {
++        syslog(LOG_ERR, "[%s] base64 decode failed (%zu chars)\n", TAG,
++            b64_len);
++        ret = -EIO;
++        goto out;
++    }
++
++    if (!parse_wav(wav, wav_len, &info)) {
++        syslog(LOG_ERR, "[%s] not a WAV payload (%zu bytes)\n", TAG, wav_len);
++        ret = -EIO;
++        goto out;
++    }
++
++    frames = info.pcm_len / (info.bits / 8) / info.channels;
++
++    syslog(LOG_INFO, "[%s] got %zu bytes WAV, %u Hz %uch %ubit, %zu frames\n",
++        TAG, wav_len, info.rate, info.channels, info.bits, frames);
++
++    if (info.rate == MIMO_TTS_OUT_RATE && info.channels == 1 && info.bits == 16) {
++        size_t bytes = info.pcm_len < pcm_cap ? info.pcm_len : pcm_cap;
++        memcpy(pcm_out, info.pcm, bytes);
++        *pcm_len = bytes & ~(size_t)1;
++        ret = 0;
++        goto out;
++    }
++
++    if (info.rate != 24000 || info.channels != 1 || info.bits != 16) {
++        syslog(LOG_ERR, "[%s] unsupported WAV layout\n", TAG);
++        ret = -ENOSYS;
++        goto out;
++    }
++
++    out_frames = resample_3to2((const short*)info.pcm, frames,
++        (short*)pcm_out, pcm_cap / 2);
++    *pcm_len = out_frames * 2;
++
++    syslog(LOG_INFO, "[%s] resampled 24000 -> %d Hz: %zu frames, %zu bytes\n",
++        TAG, MIMO_TTS_OUT_RATE, out_frames, *pcm_len);
++    ret = 0;
++
++out:
++    free(body);
++    free(resp);
++    free(wav);
++    return ret;
++}
++
++/* ------------------------------------------------------------------ */
++/* Backend registration                                                */
++/* ------------------------------------------------------------------ */
++
++static const voice_tts_ops_t s_mimo_tts_ops = {
++    .name = "mimo",
++    .init = mimo_tts_init,
++    .synthesize = mimo_tts_synthesize,
++    .deinit = NULL,
++};
++
++int mimo_tts_register(void)
++{
++    return voice_tts_register(&s_mimo_tts_ops);
++}
+diff --git a/src/voice/mimo_tts.h b/src/voice/mimo_tts.h
+new file mode 100644
+index 0000000..bae3bd2
+--- /dev/null
++++ b/src/voice/mimo_tts.h
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Register the MiMo (Xiaomi) TTS backend with the voice_tts registry.
++ * Credentials come from the LLM API key in the config store. */
++
++int mimo_tts_register(void);
++
++/* Non-zero when the backend has an API key and can synthesize. */
++
++int mimo_tts_ready(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/voice/voice_say.c b/src/voice/voice_say.c
+new file mode 100644
+index 0000000..45eaed1
+--- /dev/null
++++ b/src/voice/voice_say.c
+@@ -0,0 +1,382 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/* voice_say.c - Turn a string into sound on the board's own audio device.
++ *
++ * This is the piece that makes the device talk: the active TTS backend
++ * (mimo_tts.c on this board) produces 16 kHz mono 16-bit PCM, and
++ * audio_playback_write() streams it to the device node -- no media_player,
++ * no MP3, no files.
++ *
++ * Long replies are spoken in chunks: each chunk is one TTS round trip, so
++ * memory stays flat and playback starts before the whole answer is ready.
++ */
++
++#include "voice/voice_say.h"
++
++#include "agent_compat.h"
++#include "agent_config.h"
++#include "infra/config_store.h"
++#include "voice/audio_playback.h"
++#include "voice/mimo_tts.h"
++#include "voice/voice_tts.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++#include <unistd.h>
++
++static const char* TAG = "say";
++
++/* PCM scratch: one chunk of speech at a time. */
++
++#define SAY_PCM_CAP (512 * 1024)
++
++/* Chunking.  Chinese text is 3 bytes per character in UTF-8, so the soft
++ * limit below is roughly 40 characters -- about 9 s of speech, comfortably
++ * inside mimo_tts.c's response budget. */
++
++#define SAY_SOFT_MAX 128
++#define SAY_MIN_STOP 24
++#define SAY_CHUNK_MAX 256
++
++static const char* s_stops = "。！？；!?;\n";
++
++static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
++static volatile int s_auto;
++static int s_registered;
++static char s_dev[64];
++
++/* ------------------------------------------------------------------ */
++
++int voice_say_init(void)
++{
++    if (s_registered) {
++        return OK;
++    }
++
++    if (mimo_tts_register() != OK) {
++        syslog(LOG_ERR, "[%s] TTS backend registration failed\n", TAG);
++        return -EIO;
++    }
++
++    /* Registering makes it active when it is the first backend.  If the user
++     * configured Volcengine credentials, leave those in charge instead. */
++
++    char volc_key[8] = { 0 };
++
++    if (claw_config_get(AGENT_CFG_KEY_VOLC_API_KEY, volc_key, sizeof(volc_key))
++            == OK
++        && volc_key[0]) {
++        syslog(LOG_INFO, "[%s] keeping volcengine backend (key present)\n", TAG);
++    } else if (voice_tts_set_backend("mimo") != OK) {
++        syslog(LOG_WARNING, "[%s] could not select mimo backend\n", TAG);
++    }
++
++    s_registered = 1;
++    syslog(LOG_INFO, "[%s] TTS backend: %s\n", TAG, voice_tts_get_backend());
++
++    return OK;
++}
++
++void voice_say_set_auto(int on)
++{
++    s_auto = on ? 1 : 0;
++}
++
++int voice_say_get_auto(void)
++{
++    return s_auto;
++}
++
++/* Where to play.  The config store wins, then the board's own node if it is
++ * there, then the compile-time default (other boards). */
++
++static const char* playback_dev(void)
++{
++    if (s_dev[0]) {
++        return s_dev;
++    }
++
++    if (claw_config_get(AGENT_CFG_KEY_AUDIO_PLAYBACK_DEV, s_dev, sizeof(s_dev))
++            == OK
++        && s_dev[0]) {
++        return s_dev;
++    }
++
++    if (access("/dev/audio0", F_OK) == 0) {
++        strncpy(s_dev, "/dev/audio0", sizeof(s_dev) - 1);
++    } else {
++        strncpy(s_dev, AGENT_AUDIO_PLAYBACK_DEV, sizeof(s_dev) - 1);
++    }
++
++    syslog(LOG_INFO, "[%s] playback device: %s\n", TAG, s_dev);
++    return s_dev;
++}
++
++/* The device `say` plays on; also used by the offline `beep` check. */
++
++const char* voice_say_device(void)
++{
++    return playback_dev();
++}
++
++/* Offline announcements: audio rendered once and shipped in the image (the
++ * board's /etc is a romfs), so the device can speak with no network and no
++ * TTS engine in the loop.  Anything not in the clip set still needs the
++ * cloud path -- see the note in docs/. */
++
++#define SAY_CLIP_DIR "/etc/clips/"
++
++int voice_say_clip(const char* name)
++{
++    char path[96];
++    unsigned char buf[4096];
++    audio_playback_t* pb;
++    size_t total = 0;
++    ssize_t n;
++    int fd;
++    int ret = OK;
++
++    if (!name || !name[0]) {
++        return -EINVAL;
++    }
++
++    snprintf(path, sizeof(path), SAY_CLIP_DIR "%s.pcm", name);
++
++    fd = open(path, O_RDONLY);
++    if (fd < 0) {
++        syslog(LOG_ERR, "[%s] clip '%s' not found (%s)\n", TAG, name, path);
++        return -ENOENT;
++    }
++
++    pthread_mutex_lock(&s_lock);
++
++    pb = audio_playback_open(playback_dev(), AGENT_VOICE_SAMPLE_RATE,
++        AGENT_VOICE_CHANNELS, AGENT_VOICE_BITS);
++
++    if (!pb) {
++        pthread_mutex_unlock(&s_lock);
++        close(fd);
++        return -EIO;
++    }
++
++    while ((n = read(fd, buf, sizeof(buf))) > 0) {
++        size_t off = 0;
++
++        while (off < (size_t)n) {
++            int w = audio_playback_write(pb, buf + off, (size_t)n - off);
++            if (w <= 0) {
++                ret = w;
++                goto out;
++            }
++
++            off += (size_t)w;
++        }
++
++        total += (size_t)n;
++    }
++
++out:
++    audio_playback_close(pb);
++    pthread_mutex_unlock(&s_lock);
++    close(fd);
++
++    syslog(LOG_INFO, "[%s] clip %s: %zu bytes (%.1f s)%s\n", TAG, name, total,
++        (double)total / (AGENT_VOICE_SAMPLE_RATE * 2),
++        (ret == OK) ? "" : " (aborted)");
++    return ret;
++}
++
++/* Drop the markdown punctuation a chat model likes to sprinkle in; reading
++ * asterisks and backticks aloud is pure noise. */
++
++static void strip_markup(char* s)
++{
++    char* w = s;
++
++    for (char* r = s; *r; r++) {
++        if (*r == '*' || *r == '`' || *r == '#') {
++            continue;
++        }
++
++        *w++ = *r;
++    }
++
++    *w = '\0';
++}
++
++static int synth_and_play(const char* chunk, unsigned char* pcm, size_t cap)
++{
++    size_t pcm_len = 0;
++    int ret;
++
++    ret = voice_tts_speak(chunk, pcm, cap, &pcm_len);
++    if (ret != OK) {
++        syslog(LOG_ERR, "[%s] TTS failed: %d\n", TAG, ret);
++        return ret;
++    }
++
++    if (pcm_len == 0) {
++        return OK;
++    }
++
++    audio_playback_t* pb = audio_playback_open(playback_dev(), AGENT_VOICE_SAMPLE_RATE,
++        AGENT_VOICE_CHANNELS, AGENT_VOICE_BITS);
++
++    if (!pb) {
++        syslog(LOG_ERR, "[%s] playback open failed (%s)\n", TAG, playback_dev());
++        return -EIO;
++    }
++
++    size_t off = 0;
++
++    while (off < pcm_len) {
++        int n = audio_playback_write(pb, pcm + off, pcm_len - off);
++        if (n <= 0) {
++            syslog(LOG_ERR, "[%s] write failed: %d\n", TAG, n);
++            ret = n;
++            break;
++        }
++
++        off += (size_t)n;
++    }
++
++    audio_playback_close(pb);
++
++    syslog(LOG_INFO, "[%s] played %zu bytes (%.1f s)\n", TAG, off,
++        (double)off / (AGENT_VOICE_SAMPLE_RATE * 2));
++
++    return ret;
++}
++
++static size_t utf8_char_len(unsigned char c)
++{
++    if (c < 0x80) {
++        return 1;
++    }
++
++    if ((c & 0xE0) == 0xC0) {
++        return 2;
++    }
++
++    if ((c & 0xF0) == 0xE0) {
++        return 3;
++    }
++
++    if ((c & 0xF8) == 0xF0) {
++        return 4;
++    }
++
++    return 1;
++}
++
++int voice_say_text(const char* text)
++{
++    unsigned char* pcm;
++    char* clean;
++    char chunk[SAY_CHUNK_MAX];
++    size_t clen = 0;
++    size_t len;
++    size_t i = 0;
++    int played = 0;
++    int ret = -EINVAL;
++
++    if (!text || !text[0]) {
++        return -EINVAL;
++    }
++
++    if (voice_say_init() != OK) {
++        return -EIO;
++    }
++
++    if (!mimo_tts_ready()) {
++        syslog(LOG_ERR, "[%s] no TTS credentials; run: set_llm <url> <key> <model>\n",
++            TAG);
++        return -EACCES;
++    }
++
++    len = strlen(text);
++    clean = malloc(len + 1);
++    pcm = malloc(SAY_PCM_CAP);
++
++    if (!clean || !pcm) {
++        free(clean);
++        free(pcm);
++        return -ENOMEM;
++    }
++
++    memcpy(clean, text, len + 1);
++    strip_markup(clean);
++    len = strlen(clean);
++
++    pthread_mutex_lock(&s_lock);
++
++    syslog(LOG_INFO, "[%s] speaking %zu bytes: \"%.60s\"\n", TAG, len, clean);
++
++    while (i < len) {
++        size_t n = utf8_char_len((unsigned char)clean[i]);
++
++        if (i + n > len) {
++            n = 1;
++        }
++
++        if (clen + n + 1 > sizeof(chunk)) {
++            chunk[clen] = '\0';
++            if (synth_and_play(chunk, pcm, SAY_PCM_CAP) == OK) {
++                played = 1;
++            }
++
++            clen = 0;
++        }
++
++        memcpy(chunk + clen, clean + i, n);
++        clen += n;
++        i += n;
++
++        bool is_stop = (n == 1) && strchr(s_stops, chunk[clen - 1]) != NULL;
++
++        if ((is_stop && clen >= SAY_MIN_STOP) || clen >= SAY_SOFT_MAX) {
++            chunk[clen] = '\0';
++            if (synth_and_play(chunk, pcm, SAY_PCM_CAP) == OK) {
++                played = 1;
++            }
++
++            clen = 0;
++        }
++    }
++
++    if (clen > 0) {
++        chunk[clen] = '\0';
++        if (synth_and_play(chunk, pcm, SAY_PCM_CAP) == OK) {
++            played = 1;
++        }
++    }
++
++    pthread_mutex_unlock(&s_lock);
++
++    free(clean);
++    free(pcm);
++
++    ret = played ? OK : -EIO;
++    syslog(LOG_INFO, "[%s] done: %d\n", TAG, ret);
++    return ret;
++}
