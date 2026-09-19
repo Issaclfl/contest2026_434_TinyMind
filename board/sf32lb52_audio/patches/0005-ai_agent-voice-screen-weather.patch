@@ -164,7 +164,7 @@ index 0000000..e426240
 +}
 +#endif
 diff --git a/src/agent_main.c b/src/agent_main.c
-index 9d676c2..ede696c 100644
+index 9d676c2..25f3362 100644
 --- a/src/agent_main.c
 +++ b/src/agent_main.c
 @@ -71,6 +71,9 @@
@@ -177,47 +177,27 @@ index 9d676c2..ede696c 100644
  #ifdef CONFIG_AI_AGENT_WEIXIN
  #include "channels/weixin_channel.h"
  #endif
-@@ -327,6 +330,39 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
+@@ -327,6 +330,19 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
  static volatile bool s_voice_cooldown;
  static time_t s_voice_cooldown_until;
  
-+/* Speak a reply on the board's own speaker without holding up the outbound
-+ * queue: TTS round trip plus real-time playback takes seconds. */
++/* Speak a reply on the board's own speaker.
++ *
++ * Runs inline on the outbound-dispatch thread rather than on a short-lived
++ * detached thread: NuttX trips "rmutex count > 0" in pthread_completejoin
++ * when a detached thread exits (the agent's own detached threads are all
++ * long-lived, so they never hit it).  Speech takes seconds and the queue
++ * simply waits -- on this board that is the only channel in use. */
 +
-+static void* say_task(void* arg)
++static void say_now(const char* text)
 +{
-+    char* text = (char*)arg;
-+
 +    voice_say_text(text);
-+    free(text);
-+    return NULL;
-+}
-+
-+static void say_async(const char* text)
-+{
-+    char* copy = strdup(text);
-+    pthread_t tid;
-+    pthread_attr_t attr;
-+
-+    if (!copy) {
-+        return;
-+    }
-+
-+    pthread_attr_init(&attr);
-+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-+
-+    if (pthread_create(&tid, &attr, say_task, copy) != 0) {
-+        syslog(LOG_ERR, "[%s] could not start say thread\n", TAG);
-+        free(copy);
-+    }
-+
-+    pthread_attr_destroy(&attr);
 +}
 +
  /**
   * Reads messages from the outbound queue and dispatches them to the
   * appropriate channel (FeiShu, WebSocket, CLI, etc.).
-@@ -435,6 +471,19 @@ static void* outbound_dispatch_task(void* arg)
+@@ -435,6 +451,19 @@ static void* outbound_dispatch_task(void* arg)
              fflush(stdout);
              pthread_mutex_unlock(&g_stdout_lock);
              syslog(LOG_INFO, "[agent] [Agent]: %s\n", msg.content);
@@ -231,13 +211,13 @@ index 9d676c2..ede696c 100644
 +                agent_screen_show(msg.content);
 +
 +                if (voice_say_get_auto()) {
-+                    say_async(msg.content);
++                    say_now(msg.content);
 +                }
 +            }
          } else {
              syslog(LOG_WARNING, "[%s] Unknown channel: %s\n", TAG, msg.channel);
          }
-@@ -605,6 +654,17 @@ int ai_agent_main(int argc, char* argv[])
+@@ -605,6 +634,17 @@ int ai_agent_main(int argc, char* argv[])
          BOOT_LOG_RC(&t0, "P4", "nsh_commands_init", rc);
      }
  
@@ -548,7 +528,7 @@ index 33583e7..97b4822 100644
  }
  
 diff --git a/src/tools/tool_web_search.c b/src/tools/tool_web_search.c
-index 7499684..7e2a3c9 100644
+index 7499684..87aa99f 100644
 --- a/src/tools/tool_web_search.c
 +++ b/src/tools/tool_web_search.c
 @@ -28,6 +28,7 @@
@@ -559,7 +539,7 @@ index 7499684..7e2a3c9 100644
  #include <stdlib.h>
  #include <stddef.h>
  #include "cJSON.h"
-@@ -544,33 +545,211 @@ int tool_web_search_set_news_key(const char *key)
+@@ -544,33 +545,286 @@ int tool_web_search_set_news_key(const char *key)
  
  /* ──────────────────────────────────────────────────────────────
   * get_weather tool
@@ -611,8 +591,35 @@ index 7499684..7e2a3c9 100644
 -    cJSON *input = cJSON_Parse(input_json);
 -    if (!input) {
 -        snprintf(output, output_size, "Error: Invalid input JSON");
++    /* wttr.in pads the description with spaces ("Clear "), so compare the
++     * trimmed text -- otherwise the mapping silently misses. */
++
++    char buf[64];
++    size_t n;
++
++    if (!en) {
++        return "";
++    }
++
++    while (*en == ' ' || *en == '\t') {
++        en++;
++    }
++
++    n = strlen(en);
++
++    while (n > 0 && (en[n - 1] == ' ' || en[n - 1] == '\t')) {
++        n--;
++    }
++
++    if (n >= sizeof(buf)) {
++        n = sizeof(buf) - 1;
++    }
++
++    memcpy(buf, en, n);
++    buf[n] = '\0';
++
 +    for (size_t i = 0; i < sizeof(s_weather_terms) / sizeof(s_weather_terms[0]); i++) {
-+        if (strcasecmp(s_weather_terms[i].en, en) == 0) {
++        if (strcasecmp(s_weather_terms[i].en, buf) == 0) {
 +            return s_weather_terms[i].zh;
 +        }
 +    }
@@ -626,9 +633,11 @@ index 7499684..7e2a3c9 100644
 +{
 +    cJSON *root = cJSON_Parse(json);
 +    if (!root) {
-+        return ERROR;
-+    }
-+
+         return ERROR;
+     }
+ 
+-    cJSON *loc_item = cJSON_GetObjectItem(input, "location");
+-    if (!loc_item || !cJSON_IsString(loc_item) || loc_item->valuestring[0] == '\0') {
 +    const char *city = NULL;
 +    double temp = 0, humidity = 0, wind = 0, tmax = 0, tmin = 0;
 +    const char *desc = NULL;
@@ -672,11 +681,9 @@ index 7499684..7e2a3c9 100644
 +
 +    if (!city && !desc) {
 +        cJSON_Delete(root);
-         return ERROR;
-     }
- 
--    cJSON *loc_item = cJSON_GetObjectItem(input, "location");
--    if (!loc_item || !cJSON_IsString(loc_item) || loc_item->valuestring[0] == '\0') {
++        return ERROR;
++    }
++
 +    if (tmax != 0 || tmin != 0) {
 +        snprintf(output, output_size, "%s%s%.0f度%s，湿度%.0f%%，今日%.0f到%.0f度",
 +            city ? city : "", city ? "：" : "", temp,
@@ -695,6 +702,50 @@ index 7499684..7e2a3c9 100644
 + * "当地" arrive looking like place names.  They are not: drop them and let
 + * wttr.in resolve the city from the egress IP (i.e. report the local
 + * weather, which is what the user asked for). */
++
++/* The no-LLM fast path hands us whatever text preceded "天气", so it can be
++ * "今天", "北京今天" or "请问北京".  Time and filler words are not place
++ * names: strip them wherever they appear and let the remainder be the city
++ * (an empty remainder means "resolve it from the egress IP", i.e. report the
++ * local weather). */
++
++static void weather_clean_location(char *loc)
++{
++    static const char *noise[] = {
++        "今天", "明天", "后天", "现在", "当前", "当地", "本地", "我这儿",
++        "这里", "天气", "怎么样", "如何", "请问", "查一下", "看看", "查",
++        "一下", "的", "吗", "呢",
++    };
++
++    for (size_t i = 0; i < sizeof(noise) / sizeof(noise[0]); i++) {
++        size_t nlen = strlen(noise[i]);
++
++        for (;;) {
++            char *hit = strstr(loc, noise[i]);
++            if (!hit) {
++                break;
++            }
++
++            memmove(hit, hit + nlen, strlen(hit + nlen) + 1);
++        }
++    }
++
++    /* Trim spaces from both ends. */
++
++    char *s = loc;
++    while (*s == ' ' || *s == '\t') {
++        s++;
++    }
++
++    if (s != loc) {
++        memmove(loc, s, strlen(s) + 1);
++    }
++
++    size_t n = strlen(loc);
++    while (n > 0 && (loc[n - 1] == ' ' || loc[n - 1] == '\t')) {
++        loc[--n] = '\0';
++    }
++}
 +
 +static int weather_location_is_noise(const char *loc)
 +{
@@ -736,6 +787,10 @@ index 7499684..7e2a3c9 100644
 +        }
          cJSON_Delete(input);
 -        snprintf(output, output_size, "Error: Missing 'location' field");
++    }
++
++    if (location[0]) {
++        weather_clean_location(location);
 +    }
 +
 +    if (location[0] && weather_location_is_noise(location)) {
@@ -785,7 +840,7 @@ index 7499684..7e2a3c9 100644
  
      if (s_tavily_key[0]) {
          int err = tavily_search(search_query, output, output_size);
-@@ -590,8 +769,8 @@ int tool_get_weather_execute(const char *input_json, char *output, size_t output
+@@ -590,8 +844,8 @@ int tool_get_weather_execute(const char *input_json, char *output, size_t output
      }
  
      snprintf(output, output_size,
@@ -1642,10 +1697,10 @@ index 6a2089c..fa4446e 100644
              TAG, pb->total_written);
 diff --git a/src/voice/mimo_tts.c b/src/voice/mimo_tts.c
 new file mode 100644
-index 0000000..6c2d513
+index 0000000..bb5190f
 --- /dev/null
 +++ b/src/voice/mimo_tts.c
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,426 @@
 +/*
 + * Copyright (C) 2026 Xiaomi Corporation
 + *
@@ -1966,18 +2021,35 @@ index 0000000..6c2d513
 +    snprintf(auth_value, sizeof(auth_value), "Bearer %s", s_api_key);
 +    auth[0].value = auth_value;
 +
-+    status = vela_https_request(MIMO_TTS_HOST, MIMO_TTS_PORT, "POST",
-+        MIMO_TTS_PATH, auth, body, strlen(body), resp, MIMO_TTS_RESP_CAP, NULL);
++    /* The audio payload is a few hundred KB, and the first read after the
++     * header occasionally comes back empty; retry a couple of times rather
++     * than telling the user the device cannot talk. */
 +
-+    if (status != 200) {
-+        syslog(LOG_ERR, "[%s] HTTP %d: %.120s\n", TAG, status, resp);
-+        ret = -EIO;
-+        goto out;
++    for (int attempt = 1; attempt <= 3; attempt++) {
++        size_t resp_len = 0;
++
++        status = vela_https_request(MIMO_TTS_HOST, MIMO_TTS_PORT, "POST",
++            MIMO_TTS_PATH, auth, body, strlen(body), resp, MIMO_TTS_RESP_CAP,
++            &resp_len);
++
++        if (status == 200) {
++            b64 = find_audio_b64(resp, &b64_len);
++            if (b64) {
++                break;
++            }
++
++            syslog(LOG_WARNING, "[%s] attempt %d: HTTP 200, %zu bytes, no audio (%.60s)\n",
++                TAG, attempt, resp_len, resp);
++        } else {
++            syslog(LOG_WARNING, "[%s] attempt %d: HTTP %d (%zu bytes)\n", TAG,
++                attempt, status, resp_len);
++        }
++
++        usleep(400 * 1000);
 +    }
 +
-+    b64 = find_audio_b64(resp, &b64_len);
 +    if (!b64) {
-+        syslog(LOG_ERR, "[%s] no audio.data in response (%.80s)\n", TAG, resp);
++        syslog(LOG_ERR, "[%s] no audio.data after 3 attempts\n", TAG);
 +        ret = -EIO;
 +        goto out;
 +    }

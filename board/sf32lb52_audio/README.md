@@ -573,4 +573,31 @@ FreeType、不需要外挂字体文件），`agent_main` 在 CLI 通道打印回
 非动作回复（普通对话）不走这条：文本原样上屏，`say_auto on` 时再交给云 TTS 念出来——
 两条路互补，互不干扰。
 
+### 7.12 上板踩到并修掉的三个新问题（2026-09-20 深夜）
+
+**① 中文字形缺字（屏上出现方框）**。LVGL 自带的 `lv_font_simsun_16_cjk` 只带 ASCII 加
+一份很偏的子集（其生成参数里日文占大半），"块/屏/叭/念"这类常用字不在里面，直接画方框。
+改为 **FreeType + Noto Sans SC 子集**：用 `tools/subset_font.py` 从树里 10.5 MB 的
+Noto Sans SC 裁出 GB2312 一级+二级（**6891 码点，2.2 MB**），随固件烧进 romfs
+`/etc/fonts/NotoSansSC-sub.ttf`，界面以 22 px 渲染。踩点：LVGL 这版 `lv_font_init`
+在"已被初始化"时返回非 OK，一开始被我当成失败直接放弃（日志 `FreeType could not open`），
+改成"已初始化就继续建字体"才对。
+
+**② 短命 detached 线程退出时触发 NuttX 断言**。自动播报原先放在一个 `PTHREAD_CREATE_DETACHED`
+的小线程里（怕阻塞出站队列），结果播完线程退出时崩在
+`pthread_completejoin → nxrmutex_unlock`：`DEBUGASSERT(rmutex->count > 0)`。
+agent 自己那些 detached 线程都是**长命线程**，所以从不走这条退出路径——这也解释了为什么
+只有我们这处会崩。修法：**不再建线程**，直接在出站线程里同步播报（播报期间队列等待，
+本板演示只有这一条通道，可接受）。
+
+**③ 天气工具的"城市名"其实是时间词**。无 LLM 的快速通道会把"天气"之前的文字当城市名传进来，
+于是 `今天`、`北京今天` 都成了查询目标（后者让 wttr.in 返回 500）。加了子串清理：把
+今天/明天/现在/当地/怎么样/请问… 从任意位置剔除，剩下为空就按出口 IP 定位（即"当地天气"）。
+
+**同时确认的事实**：板子经 S3 的 NAPT 完整可用——`net_test` 到 baidu **TLS 1.2 + HTTP 200**，
+`get_weather` 经 wttr.in 拿到真实数据（"Masong：21度…湿度80%，今日20到32度"），
+云 TTS 的握手也成功。**但 S3 侧固件是旧的**：其源码（`net_cloud.c`，镜像与仓库逐字节一致）
+早就有 `model == "cmd"` 的本地命令模型分支，而 S3 上烧的那版没有，所以 `model:"cmd"`
+落到兜底小模型、回了句"model said: ..."。要跑离线控制必须把网关重编重烧一次。
+
 
