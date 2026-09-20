@@ -1,0 +1,188 @@
+diff --git a/examples/pppd/pppd_main.c b/examples/pppd/pppd_main.c
+index ce80ae9..311c0ba 100644
+--- a/examples/pppd/pppd_main.c
++++ b/examples/pppd/pppd_main.c
+@@ -38,7 +38,14 @@
+  ****************************************************************************/
+ 
+ #include <nuttx/config.h>
++
++#include <errno.h>
++#include <fcntl.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <termios.h>
++#include <unistd.h>
+ 
+ #include "netutils/pppd.h"
+ 
+@@ -46,10 +53,21 @@
+  * Pre-processor Definitions
+  ****************************************************************************/
+ 
++/* Line rate for a direct link when the caller does not name one.  Not every
++ * USB-UART bridge can produce the 1000000 that a board's console UART may
++ * have been set up for, but they can all produce 460800.
++ */
++
++#define PPPD_DEFAULT_BAUD 460800
++
+ /****************************************************************************
+  * Private Data
+  ****************************************************************************/
+ 
++/* Dial-up script for a cellular modem.  A direct serial link to a host has
++ * no modem to talk to, so these apply only when pppd is given no tty.
++ */
++
+ static FAR const char connect_script[] =
+   "ECHO ON "
+   "TIMEOUT 30 "
+@@ -62,6 +80,57 @@ static FAR const char disconnect_script[] =
+   "\"\" ATZ "
+   "OK \\c";
+ 
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: set_line_rate
++ *
++ * Description:
++ *   Apply a line rate to the serial device before pppd() opens it.  pppd()
++ *   only open()s the tty, so the link runs at whatever rate the driver was
++ *   initialised with, which is not necessarily the rate the peer expects.
++ *
++ ****************************************************************************/
++
++static int set_line_rate(FAR const char *tty, int baud)
++{
++  struct termios term;
++  int fd;
++  int ret;
++
++  fd = open(tty, O_RDWR);
++  if (fd < 0)
++    {
++      return -errno;
++    }
++
++  ret = tcgetattr(fd, &term);
++  if (ret == 0)
++    {
++      cfsetispeed(&term, baud);
++      cfsetospeed(&term, baud);
++      ret = tcsetattr(fd, TCSANOW, &term);
++    }
++
++  close(fd);
++  return ret;
++}
++
++/****************************************************************************
++ * Name: usage
++ ****************************************************************************/
++
++static void usage(FAR const char *progname)
++{
++  printf("Usage: %s [<tty> [<baud>]]\n"
++         "  %s                - dial a cellular modem on /dev/ttyS1\n"
++         "  %s <tty>          - direct serial link at %d baud\n"
++         "  %s <tty> <baud>   - direct serial link at the given rate\n",
++         progname, progname, progname, PPPD_DEFAULT_BAUD, progname);
++}
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -70,18 +139,60 @@ static FAR const char disconnect_script[] =
+  * Name: pppd_main
+  ****************************************************************************/
+ 
+-int main(int argc, char *argv[])
++int main(int argc, FAR char *argv[])
+ {
+-  const struct pppd_settings_s pppd_settings =
+-  {
+-    .disconnect_script = disconnect_script,
+-    .connect_script = connect_script,
+-    .ttyname = "/dev/ttyS1",
++  struct pppd_settings_s pppd_settings;
++
++  memset(&pppd_settings, 0, sizeof(pppd_settings));
++
+ #ifdef CONFIG_NETUTILS_PPPD_PAP
+-    .pap_username = "user",
+-    .pap_password = "pass",
++  strlcpy(pppd_settings.pap_username, "user",
++          sizeof(pppd_settings.pap_username));
++  strlcpy(pppd_settings.pap_password, "pass",
++          sizeof(pppd_settings.pap_password));
+ #endif
+-  };
++
++  if (argc > 1 && (strcmp(argv[1], "-h") == 0 ||
++                   strcmp(argv[1], "--help") == 0))
++    {
++      usage(argv[0]);
++      return EXIT_SUCCESS;
++    }
++
++  if (argc > 1)
++    {
++      int baud = PPPD_DEFAULT_BAUD;
++
++      strlcpy(pppd_settings.ttyname, argv[1],
++              sizeof(pppd_settings.ttyname));
++
++      if (argc > 2)
++        {
++          baud = atoi(argv[2]);
++          if (baud <= 0)
++            {
++              fprintf(stderr, "%s: bad baud rate '%s'\n", argv[0], argv[2]);
++              return EXIT_FAILURE;
++            }
++        }
++
++      if (set_line_rate(pppd_settings.ttyname, baud) < 0)
++        {
++          fprintf(stderr, "%s: cannot set %s to %d baud\n",
++                  argv[0], pppd_settings.ttyname, baud);
++          return EXIT_FAILURE;
++        }
++
++      printf("pppd: %s at %d baud, direct link\n",
++             pppd_settings.ttyname, baud);
++    }
++  else
++    {
++      strlcpy(pppd_settings.ttyname, "/dev/ttyS1",
++              sizeof(pppd_settings.ttyname));
++      pppd_settings.connect_script = connect_script;
++      pppd_settings.disconnect_script = disconnect_script;
++    }
+ 
+   return pppd(&pppd_settings);
+ }
+diff --git a/netutils/pppd/ppp_conf.h b/netutils/pppd/ppp_conf.h
+index 7768dff..05703ab 100644
+--- a/netutils/pppd/ppp_conf.h
++++ b/netutils/pppd/ppp_conf.h
+@@ -56,7 +56,13 @@
+ #define xxdebug_printf          ninfo
+ #define debug_printf            ninfo
+ 
+-#define PPP_RX_BUFFER_SIZE      1024 //1024  //GD 2048 for 1280 IPv6 MTU
++/* Holds one whole IP packet, and one whole AHDLC frame while it is being
++ * reassembled.  The frame is the larger of the two: an MTU-sized packet
++ * plus protocol and FCS fields, inflated by the escape bytes that 0x7e and
++ * 0x7d turn into.  1024 leaves a 1500-byte MTU no room at all.
++ */
++
++#define PPP_RX_BUFFER_SIZE      2048
+ 
+ #define AHDLC_TX_OFFLINE        5
+ 

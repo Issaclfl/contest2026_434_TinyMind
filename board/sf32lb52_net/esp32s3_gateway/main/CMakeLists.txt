@@ -7,6 +7,7 @@ idf_component_register(
         "cmd_exec.c"
         "voice_exec.c"
         "net_miio.c"
+        "net_clf.c"
     INCLUDE_DIRS "."
     REQUIRES
         espllm          # ../esp32s3_common/components/espllm

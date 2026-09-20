@@ -22,6 +22,7 @@ typedef struct {
     char ip[20];
     char token[40];   /* 32 个十六进制字符 */
     char model[28];   /* 例如 "yeelink.light.color3"；仅用于日志与能力判断 */
+    int port;         /* 设备端口，默认 54321（表里第 5 个字段可覆盖） */
 } miio_device_t;
 
 /* 读设备表并打一条状态日志。设备表为空是合法状态（未配置米家设备）。 */
@@ -51,3 +52,7 @@ int net_miio_run(const char *name, const char *op, int value, const char *arg,
  *   "lamp info" / "lamp prop power" / "lamp raw get_prop [\"power\"]"
  * 不含任何模型推理 —— 先用它把协议链路单独验通。 */
 int net_miio_run_text(const char *text, char *out, size_t out_size);
+
+/* 把一次执行结果翻成给用户听的一句话（中文纯文本）。返回 0 表示"成功且已翻译"，-1 表示失败。
+ * 机器可读的 JSON 仍由 net_miio_run 给出。 */
+int net_miio_zh(const char *cmd_text, const char *result_json, char *out, size_t out_size);

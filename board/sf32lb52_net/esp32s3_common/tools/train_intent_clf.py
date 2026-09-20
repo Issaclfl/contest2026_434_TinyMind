@@ -59,11 +59,19 @@ def main():
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--lr", type=float, default=0.5)
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--save", default=os.path.expanduser("~/qc/clf.pt"))
+    ap.add_argument("--extra", action="append", default=[], metavar="JSONL",
+                    help="额外语料（{cmd,json} 每行一条，可给多次）；只进训练集\n"
+                         "留出集不变，所以两种来源都能在统计里对得上")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     train = load(os.path.join(args.data, "train.jsonl"))
     held = load(os.path.join(args.data, "heldout.jsonl"))
+    for extra in args.extra:
+        rows = load(extra)
+        train.extend(rows)
+        print("额外语料 %s：%d 条 -> 训练集" % (extra, len(rows)))
     labels = sorted({r["json"] for r in train + held})
     idx = {lab: i for i, lab in enumerate(labels)}
     print("训练 %d 条 / 留出 %d 条 / 类别 %d" % (len(train), len(held), len(labels)))
@@ -127,6 +135,9 @@ def main():
                  if {a, b} & {"on", "off"} or {a, b} & {"brightness"}]
         print("开/关 或 亮度 相关混淆: %d 处" % sum(n for (_, _), n in
               [((a, b), n) for (a, b), n in conf.items() if {a, b} & {"on", "off", "brightness"}]))
+    torch.save({"W": model.weight.detach(), "b": model.bias.detach(),
+                "labels": labels, "dim": DIM, "ngrams": NGRAMS}, args.save)
+    print(chr(10) + "权重已存: " + args.save)
     return 0
 
 

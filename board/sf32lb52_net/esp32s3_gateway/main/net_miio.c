@@ -224,7 +224,7 @@ static int miio_call(const miio_device_t *dev, const char *method, const char *p
     struct sockaddr_in dst;
     memset(&dst, 0, sizeof(dst));
     dst.sin_family = AF_INET;
-    dst.sin_port = htons(MIIO_PORT);
+    dst.sin_port = htons((uint16_t)dev->port);
     inet_pton(AF_INET, dev->ip, &dst.sin_addr);
 
     int ret = -1;
@@ -446,6 +446,7 @@ void net_miio_init(void)
          row = strtok_r(NULL, ";", &save)) {
         miio_device_t *d = &s_dev[s_dev_count];
         memset(d, 0, sizeof(*d));
+        d->port = MIIO_PORT;
         char *c1 = strchr(row, ',');
         if (c1 == NULL) {
             continue;
@@ -464,6 +465,15 @@ void net_miio_init(void)
         snprintf(d->name, sizeof(d->name), "%s", row);
         snprintf(d->ip, sizeof(d->ip), "%s", c1 + 1);
         snprintf(d->token, sizeof(d->token), "%s", c2 + 1);
+        if (c3 != NULL) {
+            char *c4 = strchr(c3 + 1, ',');
+            if (c4 != NULL) {
+                int p = atoi(c4 + 1);
+                if (p > 0 && p < 65536) {
+                    d->port = p;
+                }
+            }
+        }
         if (d->name[0] == '\0' || d->ip[0] == '\0' || strlen(d->token) < 32) {
             continue;              /* 半截的行直接丢，别让坏配置变成诡异行为 */
         }
@@ -504,7 +514,7 @@ int net_miio_hello(const char *name, char *out, size_t out_size)
     struct sockaddr_in dst;
     memset(&dst, 0, sizeof(dst));
     dst.sin_family = AF_INET;
-    dst.sin_port = htons(MIIO_PORT);
+    dst.sin_port = htons((uint16_t)dev->port);
     inet_pton(AF_INET, dev->ip, &dst.sin_addr);
 
     int ret = -1;
@@ -532,4 +542,74 @@ int net_miio_hello(const char *name, char *out, size_t out_size)
     }
     close(fd);
     return ret;
+}
+
+/* --------------------------------------------------- 给板子念的一句话 -- */
+
+/* 板子的播报层认纯文本（中文），所以这里把执行结果翻成一句话；
+ * 机器可读的那份 JSON 由调用方另外带走（net_cloud 里拼进 miio_result 字段）。
+ * 只做翻译，不做判断——成功与否看 net_miio_run 的结果。 */
+int net_miio_zh(const char *cmd_text, const char *result_json, char *out, size_t out_size)
+{
+    char label[24] = "设备";
+    char op[24] = "";
+    int value = 0;
+
+    if (cmd_text != NULL) {
+        char buf[192];
+        snprintf(buf, sizeof(buf), "%s", cmd_text);
+        char *save = NULL;
+        char *dev = strtok_r(buf, " ", &save);
+        char *o = strtok_r(NULL, " ", &save);
+        char *arg = strtok_r(NULL, " ", &save);
+        if (o != NULL) {
+            snprintf(op, sizeof(op), "%s", o);
+        }
+        if (arg != NULL) {
+            value = atoi(arg);
+        }
+        /* 逻辑名 -> 说给用户听的名字。加设备时在这里补一行即可。 */
+        if (dev != NULL && strcmp(dev, "lamp") == 0) {
+            snprintf(label, sizeof(label), "台灯");
+        } else if (dev != NULL && strcmp(dev, "ac") == 0) {
+            snprintf(label, sizeof(label), "空调");
+        } else if (dev != NULL && dev[0] != '\0') {
+            snprintf(label, sizeof(label), "%s", dev);
+        }
+    }
+
+    bool ok = (result_json != NULL) && (strstr(result_json, "ok\":true") != NULL);
+    if (!ok && result_json != NULL && strstr(result_json, "没有这台设备") != NULL) {
+        snprintf(out, out_size, "没有找到这台设备");
+        return -1;
+    }
+    if (!ok) {
+        snprintf(out, out_size, "%s没有回应", label);
+        return -1;
+    }
+
+    if (strcmp(op, "on") == 0) {
+        snprintf(out, out_size, "%s已打开", label);
+    } else if (strcmp(op, "off") == 0) {
+        snprintf(out, out_size, "%s已关闭", label);
+    } else if (strcmp(op, "toggle") == 0) {
+        snprintf(out, out_size, "%s已切换", label);
+    } else if (strcmp(op, "brightness") == 0) {
+        snprintf(out, out_size, "%s亮度已调到 %d", label, value);
+    } else if (strcmp(op, "color_temp") == 0) {
+        snprintf(out, out_size, "%s色温已调到 %dK", label, value);
+    } else if (strcmp(op, "info") == 0) {
+        snprintf(out, out_size, "%s状态正常", label);
+    } else if (strcmp(op, "prop") == 0 && result_json != NULL) {
+        if (strstr(result_json, "\"on\"") != NULL) {
+            snprintf(out, out_size, "%s现在是开着的", label);
+        } else if (strstr(result_json, "\"off\"") != NULL) {
+            snprintf(out, out_size, "%s现在是关着的", label);
+        } else {
+            snprintf(out, out_size, "%s状态已读回", label);
+        }
+    } else {
+        snprintf(out, out_size, "%s已执行", label);
+    }
+    return 0;
 }

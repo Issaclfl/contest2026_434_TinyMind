@@ -54,6 +54,19 @@ copy_over "$HERE/board_files/drivers_CMakeLists.txt" "$WORK/vendor/sifli/boards/
 copy_over "$HERE/board_files/defconfig"             "$BOARD/configs/nsh/defconfig"                 "configs/nsh/defconfig       (CONFIG_AUDIO=y)"
 copy_over "$HERE/board_files/sifli_ap.c"            "$BOARD/src/sifli_ap.c"                        "src/sifli_ap.c              (注册 /dev/audio0)"
 
+# ---------- 3. 离线播报片段（romfs 里的 /etc/clips）----------
+# 这些是预合成的语音，属于数据而不是源码：由 tools/make_voice_clips.py 生成，
+# 生成过程要联网和云端 TTS 凭据，所以产物直接入库、由本脚本就位。
+mkdir -p "$BOARD/src/etc/clips"
+for f in "$HERE"/clips/*.pcm; do
+  cp "$f" "$BOARD/src/etc/clips/"
+done
+echo "  [applied] etc/clips/*.pcm        ($(ls "$HERE"/clips/*.pcm | wc -l) 条离线播报)"
+
+if [ ! -f "$BOARD/src/etc/fonts/NotoSansSC-sub.ttf" ]; then
+  echo "  [warn]    缺 etc/fonts/NotoSansSC-sub.ttf —— 用 tools/subset_font.py 生成后放到该目录" >&2
+fi
+
 echo
 echo "完成。校验："
 grep -q "bsp_audio.c" "$BOARD/src/CMakeLists.txt"                     && echo "  [ok] 驱动已进 CMake SRCS"

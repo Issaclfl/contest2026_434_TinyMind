@@ -68,7 +68,7 @@ def parse_rows(table):
 
 def render(rows):
     return ";".join(
-        "%s,%s,%s,%s" % (r["name"], r["ip"], r["token"], r["model"]) for r in rows
+        "%s,%s,%s,%s,%s" % (r["name"], r["ip"], r["token"], r["model"], r.get("port", "54321")) for r in rows
     )
 
 
@@ -108,6 +108,7 @@ def main():
     ap.add_argument("--ip", help="设备局域网 IP")
     ap.add_argument("--token", help="32 位十六进制 token；不给就隐藏输入")
     ap.add_argument("--model", default="", help="例如 yeelink.light.color3（可空）")
+    ap.add_argument("--port", type=int, default=54321, help="设备端口，默认 54321")
     ap.add_argument("--show", action="store_true", help="显示当前表（token 打码）")
     ap.add_argument("--clear", action="store_true", help="清空设备表")
     ap.add_argument("--sdkconfig", default=DEFAULT_SDKCONFIG)
@@ -121,7 +122,7 @@ def main():
         if not rows:
             print("%s : (未配置)" % KEY)
         for r in rows:
-            print("  %-8s %-16s %s %s" % (r["name"], r["ip"], mask(r["token"]), r["model"]))
+            print("  %-8s %-16s:%-5s %s %s" % (r["name"], r["ip"], r.get("port", "54321"), mask(r["token"]), r["model"]))
         if not (args.add or args.clear):
             print("\n加设备： --add <名字> --ip <IP> [--model <型号>]")
         return 0
@@ -145,7 +146,8 @@ def main():
         return 2
 
     rows = [r for r in rows if r["name"] != name]
-    rows.append({"name": name, "ip": ip, "token": token, "model": args.model.strip()})
+    rows.append({"name": name, "ip": ip, "token": token, "model": args.model.strip(),
+                 "port": str(args.port)})
     rows.sort(key=lambda r: r["name"])
 
     if not write_table(args.sdkconfig, render(rows)):

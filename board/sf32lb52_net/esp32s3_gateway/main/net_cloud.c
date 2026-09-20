@@ -35,6 +35,8 @@
 #include "espllm.h"
 #include "cmd_exec.h"
 #include "net_miio.h"
+#include "net_clf.h"
+#include "cJSON.h"
 #include "net_ppp.h"
 #include "net_wifi.h"
 
@@ -332,9 +334,34 @@ static esp_err_t route(const char *body, size_t body_len, char **response)
             ESP_LOGW(TAG, "cmd: no content field");
         } else {
             ESP_LOGI(TAG, "cmd: %s", text);
-            if (cmd_exec_run(text, answer, sizeof(answer)) != 0) {
+            /* 先问本地分类器（完全离线）：它只判断“这句话是哪个动作”。
+             * 命中米家动作就交给 miIO 客户端执行，再把结果翻成一句中文；
+             * 不是米家动作则照旧走原来的规则执行器（英文口令那套不受影响）。 */
+            const char *label = net_clf_classify(text);
+            cJSON *doc = (label != NULL) ? cJSON_Parse(label) : NULL;
+            cJSON *jact = doc ? cJSON_GetObjectItem(doc, "action") : NULL;
+            if (jact != NULL && cJSON_IsString(jact) && strcmp(jact->valuestring, "miio") == 0) {
+                const char *dev = "lamp";
+                const char *op = "";
+                int value = 0;
+                cJSON *j = cJSON_GetObjectItem(doc, "device");
+                if (j != NULL && cJSON_IsString(j)) { dev = j->valuestring; }
+                j = cJSON_GetObjectItem(doc, "op");
+                if (j != NULL && cJSON_IsString(j)) { op = j->valuestring; }
+                j = cJSON_GetObjectItem(doc, "value");
+                if (j != NULL && cJSON_IsNumber(j)) { value = (int)j->valuedouble; }
+                char raw[512];
+                char line[64];
+                char zh[192];
+                snprintf(line, sizeof(line), "%s %s %d", dev, op, value);
+                net_miio_run(dev, op, value, NULL, raw, sizeof(raw));
+                net_miio_zh(line, raw, zh, sizeof(zh));
+                snprintf(answer, sizeof(answer), "%s", zh);
+                ESP_LOGI(TAG, "cmd->clf->miio: %s => %s", label, answer);
+            } else if (cmd_exec_run(text, answer, sizeof(answer)) != 0) {
                 ESP_LOGW(TAG, "cmd failed: %s", answer);
             }
+            if (doc != NULL) { cJSON_Delete(doc); }
         }
         s_stats.cmd_run++;
         s_last_us = esp_timer_get_time() - t0;
@@ -387,15 +414,19 @@ static esp_err_t route(const char *body, size_t body_len, char **response)
 
         /* 转义后拼成 OpenAI 形状的响应。**只有一个 %s，也只有一个实参** ——
          * 上一版把 %lld 和 %s 混着写、又把 " 漏成了裸引号，编译器直接拒了。 */
-        char *esc = malloc(strlen(answer) * 2 + 1);
-        char *resp = malloc(strlen(answer) * 2 + 384);
+        /* 板子要念的是中文；机器可读的 JSON 另挂在 miio_result 字段里。 */
+        char zh[192];
+        net_miio_zh(text, answer, zh, sizeof(zh));
+
+        char *esc = malloc(strlen(zh) * 2 + 1);
+        char *resp = malloc(strlen(zh) * 2 + strlen(answer) + 640);
         if (esc == NULL || resp == NULL) {
             free(esc);
             free(resp);
             return ESP_ERR_NO_MEM;
         }
         size_t o = 0;
-        for (const char *q = answer; *q != '\0'; q++) {
+        for (const char *q = zh; *q != '\0'; q++) {
             if (*q == '"' || *q == '\\') {
                 esc[o++] = '\\';
             } else if (*q == '\n') {
@@ -406,7 +437,7 @@ static esp_err_t route(const char *body, size_t body_len, char **response)
             esc[o++] = *q;
         }
         esc[o] = '\0';
-        snprintf(resp, strlen(answer) * 2 + 384,
+        snprintf(resp, strlen(zh) * 2 + strlen(answer) + 640,
                  "{\"id\":\"chatcmpl-miio\",\"object\":\"chat.completion\",\"created\":0,"
                  "\"model\":\"miio\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"ass"
                  "istant\",\"content\":\"%s\"},\"finish_reason\":\"stop\"}],\"usage\":{\"p"

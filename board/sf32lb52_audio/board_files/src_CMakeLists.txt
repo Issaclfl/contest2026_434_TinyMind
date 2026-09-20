@@ -31,6 +31,23 @@ nuttx_add_romfs(
   RCRAWS
   etc/group
   etc/1.txt
+  etc/clips/light_on.pcm
+  etc/clips/light_off.pcm
+  etc/clips/red_on.pcm
+  etc/clips/blue_on.pcm
+  etc/clips/offline.pcm
+  etc/clips/ok.pcm
+  etc/clips/unknown.pcm
+  etc/clips/temp_high.pcm
+  etc/clips/lamp_on.pcm
+  etc/clips/lamp_off.pcm
+  etc/clips/ac_on.pcm
+  etc/clips/ac_off.pcm
+  etc/clips/bright_set.pcm
+  etc/clips/ct_set.pcm
+  etc/clips/no_reply.pcm
+  etc/clips/no_device.pcm
+  etc/fonts/NotoSansSC-sub.ttf   # tools/subset_font.py 生成
   PATH
   ${CMAKE_CURRENT_LIST_DIR}/etc)
 

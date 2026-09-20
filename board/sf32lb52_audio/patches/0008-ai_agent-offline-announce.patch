@@ -1,0 +1,78 @@
+第 8 批：让板子的播报层认得网关自己判出来的句子。
+背景见 docs/米家生态控制方案.md —— 网关用本地模型判完就直接在局域网里发指令，
+答复是一句话而不是动作 JSON；断网时云端 TTS 用不了，所以这类句子改从
+/etc/clips 里预合成的片段播报（片段由 tools/make_voice_clips.py 生成）。
+依赖：先应用 0005（它创建了 voice_say.c）。
+
+--- a/packages/ai_agent/src/voice/voice_say.c
++++ b/packages/ai_agent/src/voice/voice_say.c
+@@ -295,6 +295,52 @@
+ }
+ 
+ 
++/* Offline announcements for gateway-composed sentences.
++ *
++ * The gateway's local command model answers with a sentence, not with the
++ * action JSON the rest of the offline path uses ("台灯已打开").  With the
++ * uplink down the TTS engine cannot be reached, so sentences that are known
++ * ahead of time are announced from the image.  Longest match first: the
++ * device name is part of the sentence, so the specific rows must win over
++ * the generic ones.  Rows whose sentence carries a number (brightness,
++ * colour temperature) use one generic clip -- rendering every value would
++ * cost flash for nothing, and the screen still shows the number. */
++
++static const struct {
++    const char* match;
++    const char* clip;
++} s_offline_phrases[] = {
++    { "台灯已打开", "lamp_on" },
++    { "台灯已关闭", "lamp_off" },
++    { "台灯现在是开着的", "lamp_on" },
++    { "台灯现在是关着的", "lamp_off" },
++    { "空调已打开", "ac_on" },
++    { "空调已关闭", "ac_off" },
++    { "空调现在是开着的", "ac_on" },
++    { "空调现在是关着的", "ac_off" },
++    { "亮度已调到", "bright_set" },
++    { "色温已调到", "ct_set" },
++    { "没有回应", "no_reply" },
++    { "没有找到这台设备", "no_device" },
++    { "已切换", "ok" },
++    { "状态正常", "ok" },
++    { "状态已读回", "ok" },
++    { "已执行", "ok" },
++};
++
++static const char* offline_clip_for(const char* text)
++{
++    size_t i;
++
++    for (i = 0; i < sizeof(s_offline_phrases) / sizeof(s_offline_phrases[0]); i++) {
++        if (strstr(text, s_offline_phrases[i].match) != NULL) {
++            return s_offline_phrases[i].clip;
++        }
++    }
++
++    return NULL;
++}
++
+ int voice_say_text(const char* text)
+ {
+     unsigned char* pcm;
+@@ -310,6 +356,16 @@
+         return -EINVAL;
+     }
+ 
++    /* A sentence with a pre-rendered announcement is spoken from the image:
++     * no network, no TTS engine, works with the uplink down. */
++
++    const char* offline = offline_clip_for(text);
++
++    if (offline != NULL) {
++        syslog(LOG_INFO, "[%s] offline phrase -> clip '%s'\n", TAG, offline);
++        return voice_say_clip(offline);
++    }
++
+     if (voice_say_init() != OK) {
+         return -EIO;
+     }

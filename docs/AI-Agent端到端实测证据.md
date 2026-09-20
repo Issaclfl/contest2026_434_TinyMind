@@ -234,3 +234,99 @@ key 只从被 gitignore 的 `sdkconfig` 读、不打印，响应只落系统临�
 # PC（Windows），默认从网关 sdkconfig 读 key
 python board/sf32lb52_audio/tools/tts_probe_pc.py "你好，我是 TinyMind"
 ```
+
+---
+
+## 八、离线播报接入米家答复（2026-09-20）
+
+### 8.1 为什么要改
+
+演示要的是"和官方模拟器互通时，板子上屏 **并且** 出声"。原实现里播报层只有两条路：
+
+| 答复形态 | 走哪条 | 断网时 |
+|---|---|---|
+| 动作 JSON（`{"action":"led",...}`） | `action_announce()` → `/etc/clips` 片段 | 有声音 |
+| 其它文本 | `voice_say_text()` → 云端 TTS（mimo） | **没声音**，只剩屏幕 |
+
+网关判出来的米家答复是**一句话**（`台灯已打开`），既不是动作 JSON，断网时也够不到云 TTS，
+所以演练断网演示时板子会变成"哑巴"。
+
+### 8.2 改法
+
+`voice_say.c` 的 `voice_say_text()` 开头加一张"句子 → 片段"表，命中就走本地片段：
+
+```c
+const char* offline = offline_clip_for(text);
+
+if (offline != NULL) {
+    syslog(LOG_INFO, "[%s] offline phrase -> clip '%s'\n", TAG, offline);
+    return voice_say_clip(offline);
+}
+```
+
+`offline_clip_for()` 按**子串**匹配、具体行在前，覆盖网关可能输出的全部句子：
+
+| 匹配 | 片段 |
+|---|---|
+| 台灯已打开 / 台灯现在是开着的 | `lamp_on` |
+| 台灯已关闭 / 台灯现在是关着的 | `lamp_off` |
+| 空调已打开 / 空调现在是开着的 | `ac_on` |
+| 空调已关闭 / 空调现在是关着的 | `ac_off` |
+| 亮度已调到（数字因句而异） | `bright_set` |
+| 色温已调到（数字因句而异） | `ct_set` |
+| 没有回应 | `no_reply` |
+| 没有找到这台设备 | `no_device` |
+| 已切换 / 状态正常 / 状态已读回 / 已执行 | `ok` |
+
+补丁：`patches/0008-ai_agent-offline-announce.patch`。片段清单与生成脚本：
+`clips/`（16 条 .pcm）、`tools/make_voice_clips.py`（云端 TTS 预合成，**合成时联网、播放时离线**）。
+
+### 8.3 真机日志（原文）
+
+2026-09-20 14:5x，板子 `nsh>` → `pppd /dev/ttyS0 460800 &` → `ai_agent` →
+`set_llm https://10.0.0.1/v1/chat/completions cmd local` → 连问四句：
+
+```
+>>> ask 打开台灯
+[Agent]: 台灯已打开
+[say] speaking 15 bytes: "台灯已打开"
+[say] offline phrase -> clip 'lamp_on'
+sf32lb52_audio_hw_config_playback: playback config: 16000Hz 1ch 16bit
+[audio_pb] opened /dev/audio0 (16000Hz 1ch 16bit, 2 x 8192 B)
+sf32lb52_stop: stop: overruns=0
+[audio_pb] closing (30720 bytes written, complete=1)
+[say] clip lamp_on: 30720 bytes (1.0 s)
+
+>>> ask 关闭台灯
+[Agent]: 台灯已关闭
+[say] offline phrase -> clip 'lamp_off'
+sf32lb52_stop: stop: overruns=0
+[audio_pb] closing (35840 bytes written, complete=1)
+[say] clip lamp_off: 35840 bytes (1.1 s)
+
+>>> ask 打开空调
+[Agent]: 空调已打开
+[say] offline phrase -> clip 'ac_on'
+sf32lb52_stop: stop: overruns=0
+[say] clip ac_on: 35840 bytes (1.1 s)
+
+>>> ask 台灯调亮一点
+[Agent]: 台灯亮度已调到 80
+[say] offline phrase -> clip 'bright_set'
+sf32lb52_stop: stop: overruns=0
+[say] clip bright_set: 56320 bytes (1.8 s)
+```
+
+四句都：`[Agent]:` 上屏 → `offline phrase` 命中 → 片段播完 `overruns=0`。
+
+同一段日志里的 `[mimo_tts] attempt 1/2/3: HTTP 401` 属于"思考中"那句
+（`让我查一下… / 稍等，处理中… / 正在分析…`）在试云端 TTS；本次板子上的 key 是占位值 `local`，
+所以 401 是预期的。**答复本身没走云 TTS**，这也是断网可用的前提。
+
+### 8.4 如实标注
+
+- 数字类答复（亮度/色温）播报的是**通用句**（"台灯亮度已调好"），屏幕上是精确句
+  （"台灯亮度已调到 80"）。为每个取值预合成不值得占的 flash。
+- "思考中"的提示语离线时**不发声**（它只在云 TTS 里有），演示时表现为约 2 秒静默后直接播报结果。
+- 本次四句连问**没有复现** `ask` 后的间歇崩溃（`sched_dumpstack`）；该问题仍未定位，见
+  `米家生态控制方案.md` §11.5。
