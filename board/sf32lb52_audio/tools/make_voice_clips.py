@@ -116,17 +116,51 @@ def wav_to_pcm16k_mono(wav):
 
     samples = struct.unpack("<%dh" % (len(pcm) // 2), pcm[: len(pcm) // 2 * 2])
     frames = len(samples)
+
+    # 抗混叠低通（Blackman 窗 sinc，截止 7 kHz）之后再做 3:2 插值：
+    # 直接丢采样会把 8 kHz 以上的分量折回可听带，听感发沙、发卡。
+    import math
+
+    cutoff = 7000.0 / rate
+    taps_n = 63
+    half = (taps_n - 1) / 2.0
+    taps = []
+    for i in range(taps_n):
+        x = i - half
+        if abs(x) < 1e-9:
+            h = 2 * cutoff
+        else:
+            h = math.sin(2 * math.pi * cutoff * x) / (math.pi * x)
+        w = (0.42 - 0.5 * math.cos(2 * math.pi * i / (taps_n - 1))
+             + 0.08 * math.cos(4 * math.pi * i / (taps_n - 1)))
+        taps.append(h * w)
+    gain = sum(taps)
+    taps = [t / gain for t in taps]
+
+    filtered = [0.0] * frames
+    for i in range(frames):
+        acc = 0.0
+        lo = i - int(half)
+        for j, c in enumerate(taps):
+            k = lo + j
+            if 0 <= k < frames:
+                acc += samples[k] * c
+        filtered[i] = acc
+
     out_frames = (frames * 2) // 3
     out = []
-
     for k in range(out_frames):
-        idx = (k // 2) * 3
-        if k % 2 == 0:
-            out.append(samples[idx])
-        else:
-            a = samples[idx + 1]
-            b = samples[idx + 2] if idx + 2 < frames else a
-            out.append((a + b) // 2)
+        pos = k * 1.5
+        i0 = int(pos)
+        frac = pos - i0
+        a = filtered[i0]
+        b = filtered[i0 + 1] if i0 + 1 < frames else a
+        v = a + (b - a) * frac
+        if v > 32767:
+            v = 32767
+        elif v < -32768:
+            v = -32768
+        out.append(int(v))
 
     return struct.pack("<%dh" % len(out), *out)
 
