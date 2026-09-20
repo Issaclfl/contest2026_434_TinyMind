@@ -208,20 +208,51 @@ def board_restart(console, baud, sftool, image, revive_bin):
     """
     log = []
 
-    if sftool and os.path.isfile(sftool):
-        # 优先整包重烧：板子卡死时它最可靠（只写镜像头 4 KB 有时救不回来，
-        # 今天实测过两种结果都有）。整包约 5.7 MB、几分钟；演示前不该省这一步。
-        target = image if (image and os.path.isfile(image)) else revive_bin
-        cmd = [sftool, "-c", "SF32LB52", "-p", console, "-b", str(baud),
-               "--before", "default_reset", "--after", "soft_reset",
-               "write_flash", "%s@0x12010000" % target]
-        log.append("重烧 %s" % os.path.basename(target))
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        log.append("sftool rc=%d" % r.returncode)
-        if r.returncode != 0:
-            return False, "；".join(log + ["复位失败：%s" % r.stderr.strip()[:120]])
-    else:
+    if not (sftool and os.path.isfile(sftool)):
         return False, "未配置 sftool（启动时加 --sftool 指定路径）——请手动复位板子后重试"
+
+    def run_sftool(args, timeout):
+        """跑一次 sftool。它偶尔会自己 panic（rc=101，实测过），所以失败重试一次。"""
+        cmd = [sftool, "-c", "SF32LB52", "-p", console, "-b", str(baud)] + args
+        last = None
+        for attempt in (1, 2):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                last = "超时"
+                continue
+            if r.returncode == 0:
+                return 0, ""
+            last = (r.stderr or r.stdout or "").strip()[:120]
+            time.sleep(1.5)
+        return -1, last or "未知错误"
+
+    # 1) 先走轻量路：只读 4 KB 把芯片从下载态带出来（约 10 秒）。
+    #    板子"控制台不回显"的卡死多半这一步就好，不必整包重烧。
+    rc, err = run_sftool(["--before", "default_reset", "--after", "soft_reset",
+                          "read_flash", "%s@0x12010000:0x100" % revive_bin], 120)
+    log.append("轻量复位 rc=%d" % rc if rc == 0 else "轻量复位失败(%s)" % err)
+
+    alive = False
+    if rc == 0:
+        for _ in range(8):
+            time.sleep(1.5)
+            try:
+                if console_alive(console, baud):
+                    alive = True
+                    break
+            except Exception:
+                continue
+        log.append("轻量复位后控制台%s" % ("有响应" if alive else "无响应"))
+
+    # 2) 轻量路没救回来 → 整包重烧（约 5.7 MB，一两分钟；最可靠）
+    if not alive:
+        target = image if (image and os.path.isfile(image)) else revive_bin
+        rc, err = run_sftool(["--before", "default_reset", "--after", "soft_reset",
+                              "write_flash", "%s@0x12010000" % target], 900)
+        log.append("重烧 %s rc=%d" % (os.path.basename(target), rc))
+        if rc != 0:
+            return False, "；".join(log + ["复位失败：%s" % err])
 
     # 等它起来
     for _ in range(20):
