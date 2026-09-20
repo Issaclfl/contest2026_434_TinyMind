@@ -6,9 +6,11 @@ idf_component_register(
         "net_cloud.c"
         "cmd_exec.c"
         "voice_exec.c"
+        "net_miio.c"
     INCLUDE_DIRS "."
     REQUIRES
         espllm          # ../esp32s3_common/components/espllm
+        json            # cJSON：miIO 指令与回包的解析
         esp_timer
         esp_wifi
         esp_event

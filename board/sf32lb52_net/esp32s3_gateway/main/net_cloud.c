@@ -34,6 +34,7 @@
 
 #include "espllm.h"
 #include "cmd_exec.h"
+#include "net_miio.h"
 #include "net_ppp.h"
 #include "net_wifi.h"
 
@@ -363,6 +364,57 @@ static esp_err_t route(const char *body, size_t body_len, char **response)
         free(esc);
         *response = resp;
         ESP_LOGI(TAG, "cmd answered in %.1f s: %s", (esp_timer_get_time() - t0) / 1e6, answer);
+        return ESP_OK;
+    }
+
+    /* 米家设备（局域网直控）：出现 model:"miio" 时**不经过模型**，把确定性文本
+     * 直接交给 net_miio_run_text。先用它把"协议链路"单独验通，再让本地小模型
+     * 去生成同样的动作 —— 两件事分开验，出问题才知道是哪一层。 */
+    if (strcmp(model, "miio") == 0) {
+        char text[192] = { 0 };
+        char answer[768];
+        if (!espllm_json_field_last(body, "content", text, sizeof(text))) {
+            snprintf(answer, sizeof(answer), "no command text in the request");
+        } else {
+            ESP_LOGI(TAG, "miio: %s", text);
+            if (net_miio_run_text(text, answer, sizeof(answer)) != 0) {
+                ESP_LOGW(TAG, "miio failed: %s", answer);
+            }
+        }
+        s_stats.cmd_run++;
+        s_last_us = esp_timer_get_time() - t0;
+        strlcpy(s_last_route, "local (miio)", sizeof(s_last_route));
+
+        /* 转义后拼成 OpenAI 形状的响应。**只有一个 %s，也只有一个实参** ——
+         * 上一版把 %lld 和 %s 混着写、又把 " 漏成了裸引号，编译器直接拒了。 */
+        char *esc = malloc(strlen(answer) * 2 + 1);
+        char *resp = malloc(strlen(answer) * 2 + 384);
+        if (esc == NULL || resp == NULL) {
+            free(esc);
+            free(resp);
+            return ESP_ERR_NO_MEM;
+        }
+        size_t o = 0;
+        for (const char *q = answer; *q != '\0'; q++) {
+            if (*q == '"' || *q == '\\') {
+                esc[o++] = '\\';
+            } else if (*q == '\n') {
+                esc[o++] = '\\';
+                esc[o++] = 'n';
+                continue;
+            }
+            esc[o++] = *q;
+        }
+        esc[o] = '\0';
+        snprintf(resp, strlen(answer) * 2 + 384,
+                 "{\"id\":\"chatcmpl-miio\",\"object\":\"chat.completion\",\"created\":0,"
+                 "\"model\":\"miio\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"ass"
+                 "istant\",\"content\":\"%s\"},\"finish_reason\":\"stop\"}],\"usage\":{\"p"
+                 "rompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                 esc);
+        free(esc);
+        *response = resp;
+        ESP_LOGI(TAG, "miio: %s", answer);
         return ESP_OK;
     }
 

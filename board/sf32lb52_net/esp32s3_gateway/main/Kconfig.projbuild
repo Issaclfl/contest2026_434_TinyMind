@@ -200,3 +200,11 @@ menu "SF32LB52 gateway"
         default 65536
 
 endmenu
+
+config GATEWAY_MIIO_TABLE
+    string "米家设备表（name,ip,token,model;...）"
+    default ""
+    help
+        局域网里的米家设备。token 是设备凭据，只允许写在被 gitignore 的
+        sdkconfig 里（tools/set_miio.py 负责写入），不要进仓库、不要进日志。
+        例：lamp,192.168.1.23,0123456789abcdef0123456789abcdef,yeelink.light.color3;

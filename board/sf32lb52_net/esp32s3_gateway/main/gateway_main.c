@@ -21,6 +21,7 @@
 
 #if CONFIG_GATEWAY_LOCAL_LLM
 #include "cmd_exec.h"
+#include "net_miio.h"
 #include "espllm.h"
 #include "voice_exec.h"
 #endif
@@ -118,6 +119,7 @@ void app_main(void)
          * JSON output is executed on this board.  The board knows neither the
          * cloud nor this decision. */
         cmd_exec_init();
+        net_miio_init();
         voice_start();
         /* 同一组路由再开一份 TLS：手机浏览器只在安全上下文里给麦克风，
          * http 页面上"按住说话"是点不动的（见 voice_exec.c 顶部）。 */

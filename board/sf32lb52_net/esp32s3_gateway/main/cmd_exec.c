@@ -392,7 +392,7 @@ static int http_date_now(time_t *out)
     /* 不要正文，只要响应头；4xx 也没关系，Date 头照样有。 */
     if (esp_http_client_open(c, 0) == ESP_OK) {
         esp_http_client_fetch_headers(c);
-        if (date[0] != ' ') {
+        if (date[0] != '\0') {
             rc = parse_http_date(date, out);
         }
     }
