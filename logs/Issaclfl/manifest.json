@@ -153,8 +153,8 @@
       "tool": "zcode",
       "title": "openvela",
       "started_at": "2026-09-05T17:17:54.738Z",
-      "last_event_at": "2026-09-17T16:44:06.312Z",
-      "event_count": 758,
+      "last_event_at": "2026-09-20T10:28:23.464Z",
+      "event_count": 2049,
       "file_path": "logs/Issaclfl/2026-09-05/zcode__sess_376acc10-ec32-44a6-91b4-34dd3e90f66c.jsonl",
       "collection_mode": "manual",
       "health": "ok"
@@ -213,7 +213,51 @@
       "file_path": "logs/Issaclfl/2026-09-17/zcode__sess_subagent_agent_f77f7037-7181-4420-a065-d4b9c7bb5fb5.jsonl",
       "collection_mode": "manual",
       "health": "ok"
+    },
+    {
+      "session_id": "sess_subagent_agent_68e4d9e7-559b-4215-b06d-feacc510b407",
+      "tool": "zcode",
+      "title": "You are exploring an openvela/NuttX vendor tree to scope ...",
+      "started_at": "2026-09-17T17:42:31.557Z",
+      "last_event_at": "2026-09-17T17:46:13.558Z",
+      "event_count": 5,
+      "file_path": "logs/Issaclfl/2026-09-17/zcode__sess_subagent_agent_68e4d9e7-559b-4215-b06d-feacc510b407.jsonl",
+      "collection_mode": "manual",
+      "health": "ok"
+    },
+    {
+      "session_id": "sess_subagent_agent_e47eaaec-87c0-43e6-9a38-3442eb51166e",
+      "tool": "zcode",
+      "title": "You are exploring a local repo to inform an implementatio...",
+      "started_at": "2026-09-17T17:42:31.612Z",
+      "last_event_at": "2026-09-17T17:49:45.653Z",
+      "event_count": 3,
+      "file_path": "logs/Issaclfl/2026-09-17/zcode__sess_subagent_agent_e47eaaec-87c0-43e6-9a38-3442eb51166e.jsonl",
+      "collection_mode": "manual",
+      "health": "ok"
+    },
+    {
+      "session_id": "sess_subagent_agent_d032868d-4b23-472d-8639-24a6b901a801",
+      "tool": "zcode",
+      "title": "You are verifying what an installed ESP-IDF can actually ...",
+      "started_at": "2026-09-17T17:42:31.656Z",
+      "last_event_at": "2026-09-17T17:45:11.573Z",
+      "event_count": 3,
+      "file_path": "logs/Issaclfl/2026-09-17/zcode__sess_subagent_agent_d032868d-4b23-472d-8639-24a6b901a801.jsonl",
+      "collection_mode": "manual",
+      "health": "ok"
+    },
+    {
+      "session_id": "sess_d707cc92-7f32-4d5c-a4e9-a45f39baa98f",
+      "tool": "zcode",
+      "title": "openvela AI 硬件开发者大赛作品提交",
+      "started_at": "2026-09-20T09:12:56.447Z",
+      "last_event_at": "2026-09-20T10:29:20.972Z",
+      "event_count": 176,
+      "file_path": "logs/Issaclfl/2026-09-20/zcode__sess_d707cc92-7f32-4d5c-a4e9-a45f39baa98f.jsonl",
+      "collection_mode": "manual",
+      "health": "ok"
     }
   ],
-  "updated_at": "2026-09-17T16:44:15.229724+00:00"
+  "updated_at": "2026-09-20T10:29:28.200025+00:00"
 }
