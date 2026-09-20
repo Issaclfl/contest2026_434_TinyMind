@@ -14,9 +14,9 @@ description: 在 openvela/NuttX 上为一颗新芯片或新板子移植板载音
   ↓
 NuttX 音频上半身（官方，不改）—— 排队/缓冲/多应用仲裁
   ↓  dev->ops->xxx()
-★ 适配层 lower-half（你写）—— 回答标准问题，翻译成硬件动作
+ 适配层 lower-half（你写）—— 回答标准问题，翻译成硬件动作
   ↓
-★ 硬件层（你写）—— 寄存器值 + 等待时间 + 顺序
+ 硬件层（你写）—— 寄存器值 + 等待时间 + 顺序
   ↓
 厂商 HAL / 寄存器（芯片厂提供）
 ```
@@ -46,7 +46,7 @@ find <sdk>/drivers -name 'drv_aud*' -o -name '*audcodec*' -o -name '*audprc*'
 ```c
 struct myboard_audio_s
 {
-  struct audio_lowerhalf_s dev;   /* ⭐ 必须是第一个成员 */
+  struct audio_lowerhalf_s dev;   /* 必须是第一个成员 */
   uint32_t samprate;              /* 以下才是自己的状态 */
   uint8_t  nchannels;
   bool     configured;
@@ -69,7 +69,7 @@ static const struct audio_ops_s g_ops =
   .configure  = xxx_configure,   /* 绑定采样率/声道/位宽 */
   .start      = xxx_start,
   .stop       = xxx_stop,
-  .enqueuebuffer = xxx_enqueue,  /* ⭐ 数据流通路，见步骤 5 */
+  .enqueuebuffer = xxx_enqueue,  /* 数据流通路，见步骤 5 */
   .cancelbuffer  = xxx_cancel,
   .ioctl      = xxx_ioctl,       /* 至少处理 AUDIOIOC_GETBUFFERINFO */
   .reserve    = xxx_reserve,     /* 独占标志 */

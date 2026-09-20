@@ -114,7 +114,7 @@ lunch vendor/sifli/boards/sf32lb52/sf32lb52_devkit_lcd/configs/ai_agent
 m -j6
 ```
 
-> ⚠️ 改过 `defconfig` 后必须让 `.config` 重新生成，否则增量构建会复用旧配置
+> 注意：改过 `defconfig` 后必须让 `.config` 重新生成，否则增量构建会复用旧配置
 > （`rm -rf out/sifli_sf32lb52_devkit_lcd_ai_agent` 后再 `lunch`）。这是本项目
 > 适配难点里记录的第三条同类陷阱。
 

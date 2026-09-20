@@ -165,9 +165,9 @@ Memory region         Used Size  Region Size  %age Used
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| M1 | 框架接入：函数表 + `/dev/audio0` 注册 | ✅ 完成，编译验证 |
-| M2 | 硬件上电：电源/时钟/路由/防爆音时序 | ✅ 完成，编译验证 |
-| M3 | 数据流：`enqueuebuffer` 挂队 + 环形 DMA + 半满/全满中断 + `upper(DEQUEUE)` 回调 | ✅ **代码完成，编译验证通过** |
+| M1 | 框架接入：函数表 + `/dev/audio0` 注册 | 完成，编译验证 |
+| M2 | 硬件上电：电源/时钟/路由/防爆音时序 | 完成，编译验证 |
+| M3 | 数据流：`enqueuebuffer` 挂队 + 环形 DMA + 半满/全满中断 + `upper(DEQUEUE)` 回调 | **代码完成，编译验证通过** |
 
 **M3 实现要点**（详见下文第七节）：
 
@@ -467,8 +467,8 @@ AUDIO_MSG_COMPLETE is received"（`nxrecorder.c:804`），只有 `AUDIO_MSG_COMP
 
 | 路径 | 触发 | 依赖 | 状态（2026-09-20） |
 |---|---|---|---|
-| **离线播报** | `clip <name>`（8 条固定播报） | 无——音频随固件烧进 romfs `/etc/clips/` | ✅ 真机验证：`clip light_on` 播 40,960 字节（1.3 s）、`overruns=0`，全程无网络 |
-| **在线 TTS（任意文本）** | `say <任意文本>` | 板子能上网 + LLM key | ✅ 通路验证到网络层：请求构造/回包解析/重采样/播放全过，只差网络 |
+| **离线播报** | `clip <name>`（8 条固定播报） | 无——音频随固件烧进 romfs `/etc/clips/` | 真机验证：`clip light_on` 播 40,960 字节（1.3 s）、`overruns=0`，全程无网络 |
+| **在线 TTS（任意文本）** | `say <任意文本>` | 板子能上网 + LLM key | 通路验证到网络层：请求构造/回包解析/重采样/播放全过，只差网络 |
 | **自动播报** | `say_auto on` 后 `ask` 的回复会被念出来 | 同上 | 同上（代码就绪） |
 
 **为什么离线用预合成而不是板端合成**：离线合成任意中文需要本地语音引擎（音节拼接或
@@ -500,7 +500,7 @@ ALLOCBUFFER / ENQUEUEBUFFER / REGISTERMQ / START`），实现照 `nxplayer` 抄�
 USB-C 线，PPP 到 PC）或 UART2 + USB-TTL / ESP32-S3 网关，**都需要物理接线**；接线到位前
 `say` 会停在 `net_connect ... ret=0x52`（无路由）。**离线播报不受此影响**。
 
-> ⚠️ **实测发现：控制台里敲 `restart` 会把控制台弄死**，与已知的 `quit` 同类
+> 注意：**实测发现：控制台里敲 `restart` 会把控制台弄死**，与已知的 `quit` 同类
 > （回车、`help`、`ifconfig` 全无回显，软件侧救不回来）。恢复只有物理 Reset 或重新烧录
 > （sftool 会让芯片复位，实测重烧后控制台即恢复）。**演示时不要敲 `quit`，也不要敲 `restart`。**
 

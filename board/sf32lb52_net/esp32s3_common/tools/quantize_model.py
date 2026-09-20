@@ -327,7 +327,7 @@ def main():
     if len(body) != expect:
         raise SystemExit(f"写入 {len(body):,} B，按 C 侧映射公式应为 {expect:,} B"
                          "——布局公式两边不一致，先别烧")
-    print(f"      C 侧映射公式核对：{len(body):,} B ✓")
+    print(f"      C 侧映射公式核对：{len(body):,} B 通过")
 
     model_out = model[:28] + bytes(body)
     with open(out_path, "wb") as f:

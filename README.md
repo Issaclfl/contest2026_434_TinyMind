@@ -85,12 +85,12 @@ Agent [netmgr] Network connected: 10.0.0.2
 
 | 用到的能力 | 所在仓库 | 是否 openvela | 在本作品中承担什么 |
 |---|---|---|---|
-| 板级适配（bringup / defconfig / CMake / 链接脚本） | `vendor/sifli` | ✅ vendor 仓 | 第 1 层的载体，也就是「新硬件平台适配」这条赛道的定义本身 |
-| 构建系统（`build/envsetup.sh`、cmake 模块、`lunch`/`m` 流程） | `build/` | ✅ build 仓 | 三层交付全部经它集成与验证 |
-| **AI Agent 框架 openvelaClaw** | `packages/ai_agent` | ✅ packages 仓 | **第 2 层：AI 能力落地** |
-| QuickApp / 应用框架脚手架 | `app/`、`quickapp/` | ✅ 组委会下发 | 应用侧扩展入口 |
-| LVGL 图形框架 + `lvgldemo` | `apps/graphics/lvgl` | ✅ apps 仓 | **图形能力**；`lvgldemo`、`fb` 均已在固件中确认为内置命令 |
-| NuttX 音频 lower-half 接口 | `nuttx/audio` | ⚠️ NuttX 仓（判定标准中排除） | 第 1 层的**实现接口**，不是成果本身 |
+| 板级适配（bringup / defconfig / CMake / 链接脚本） | `vendor/sifli` | vendor 仓 | 第 1 层的载体，也就是「新硬件平台适配」这条赛道的定义本身 |
+| 构建系统（`build/envsetup.sh`、cmake 模块、`lunch`/`m` 流程） | `build/` | build 仓 | 三层交付全部经它集成与验证 |
+| **AI Agent 框架 openvelaClaw** | `packages/ai_agent` | packages 仓 | **第 2 层：AI 能力落地** |
+| QuickApp / 应用框架脚手架 | `app/`、`quickapp/` | 组委会下发 | 应用侧扩展入口 |
+| LVGL 图形框架 + `lvgldemo` | `apps/graphics/lvgl` | apps 仓 | **图形能力**；`lvgldemo`、`fb` 均已在固件中确认为内置命令 |
+| NuttX 音频 lower-half 接口 | `nuttx/audio` | 注意：NuttX 仓（判定标准中排除） | 第 1 层的**实现接口**，不是成果本身 |
 
 关于最后一行需要说明清楚：音频驱动所依托的 `nuttx/audio` 接口确实属于被排除的 NuttX 内核仓，
 但**本作品的成果不是「调用了这个接口」**——是这块芯片的音频子系统此前在 openvela 上完全
@@ -180,19 +180,19 @@ nuttx_generate_kconfig(MENUDESC "Packages")
 
 ```text
 contest2026_434_TinyMind/
-├── board/sf32lb52_audio/          ⭐ 第 1 层：音频驱动适配
+├── board/sf32lb52_audio/          第 1 层：音频驱动适配
 │   ├── src/bsp_audio.c            # NuttX audio lower-half 适配层
 │   ├── src/bsp_audio_hw.c         # 硬件上电/时钟/路由/防爆音时序
 │   ├── include/                   # 对外头文件
 │   ├── board_files/               # 需覆盖到生产树的文件
 │   ├── patches/                   # 上述改动的标准 diff
 │   ├── apply.sh                   # 一键落盘脚本
-│   ├── ai_agent_port/             ⭐ 第 2 层：AI Agent 移植
+│   ├── ai_agent_port/             第 2 层：AI Agent 移植
 │   │   ├── configs/ai_agent/defconfig
 │   │   ├── packages-CMakeLists.txt
 │   │   └── README.md              # 移植说明（含 packages 树缺陷的来龙去脉）
 │   └── README.md                  # 音频适配详细说明
-├── board/sf32lb52_net/            ⭐ 第 3 层：IP 承载（PPP）
+├── board/sf32lb52_net/            第 3 层：IP 承载（PPP）
 │   ├── patches/                   # 板侧 3 处改动
 │   ├── pc_side/                   # 路线 1/2：串口桥 + socat + pppd + NAT 脚本
 │   ├── esp32s3_gateway/           # 路线 3：ESP32-S3 自己当对端（软件完成，未上板）
@@ -289,7 +289,7 @@ WSL 起 `ppp0` + NAT + MSS 夹取 → 从板子控制台验证 `ifconfig` 与 `p
 - 两边波特率都是 **460800**：板子 `pppd /dev/ttyS0 460800 &` ＝ S3 的 `GATEWAY_UART_BAUD`。
 - **开机顺序**：先给 S3 上电（等它连上 Wi-Fi），再给板子上电 → NSH 里
   `pppd /dev/ttyS0 460800 &` → `ai_agent`。
-- ⚠️ S3 侧没开 LCP echo，**S3 不重启就会一直抱着上一次的 PPP 会话**，板子怎么拨都拨不上
+- 注意：S3 侧没开 LCP echo，**S3 不重启就会一直抱着上一次的 PPP 会话**，板子怎么拨都拨不上
   （2026-09-20 实测：板子重启后 `ppp0` 一直是 `DOWN`）。链路不通时先给 S3 断电重启。
 
 ---
