@@ -284,7 +284,7 @@ if (offline != NULL) {
 ### 8.3 真机日志（原文）
 
 2026-09-20 14:5x，板子 `nsh>` → `pppd /dev/ttyS0 460800 &` → `ai_agent` →
-`set_llm https://10.0.0.1/v1/chat/completions cmd local` → 连问四句：
+`set_llm http://10.0.0.1/v1/chat/completions cmd local` → 连问四句：
 
 ```
 >>> ask 打开台灯

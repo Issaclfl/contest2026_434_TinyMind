@@ -236,7 +236,9 @@ def board_restart(console, baud, sftool, image, revive_bin):
     log.append("pppd 已下发")
     console_send(console, baud, "ai_agent", wait=6)
     log.append("ai_agent 已下发")
-    console_send(console, baud, "set_llm https://10.0.0.1/v1/chat/completions cmd local", wait=3)
+    # 走 http（:80）：S3 的 :443 TLS 口跑一段时间后会拒连，表现是板子 ask 之后
+    # 几十秒没有任何回复（板子卡在握手重试上）。:80 是同一条路由，又快又稳。
+    console_send(console, baud, "set_llm http://10.0.0.1/v1/chat/completions cmd local", wait=3)
     log.append("set_llm 已下发")
 
     try:
