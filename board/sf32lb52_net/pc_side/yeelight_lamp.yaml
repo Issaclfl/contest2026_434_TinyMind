@@ -1,0 +1,31 @@
+# 官方 miIO 模拟器（python-miio 0.6.0.dev0：miiocli devtools miio-simulator）的设备描述。
+# 字段照官方 pydantic 模型（miio/devtools/simulators/miiosimulator.py）写：
+#   name / models[{model,name}] / type / properties[{name,type,value,setter,min,max}] / methods[{name,result}]
+# 令牌由官方实现固定为全零（miio/devtools/simulators/common.py: "token": 32 * "0"）。
+# 用法： python -m miio.cli devtools miio-simulator --file yeelight_lamp.yaml
+name: 台灯（官方模拟器）
+models:
+  - model: yeelink.light.color3
+    name: Desk Lamp
+type: light
+properties:
+  - name: power
+    type: str
+    value: "on"
+    setter: set_power
+  - name: bright
+    type: int
+    value: 50
+    setter: set_bright
+    min: 1
+    max: 100
+  - name: ct
+    type: int
+    value: 4000
+    setter: set_ct_abx
+    min: 1700
+    max: 6500
+methods:
+  - name: toggle
+    result:
+      - "ok"

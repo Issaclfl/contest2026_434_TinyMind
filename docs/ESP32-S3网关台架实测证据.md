@@ -941,3 +941,63 @@ S3 5.0 s 回 43 B；换成中文分类器后回 15 B（`台灯已打开`），�
    S3 与设备同网。任一条不满足，只能说"协议通了"，不能说"控住了那台设备"。
 4. 未解决：板子侧 `ask` 的间歇崩溃；S3 侧 `etif_lwip-ppp: pppos_input_tcpip failed with -1`
    刷屏（疑与"在线 TTS 大响应 ~20 KB 截断"同源）。
+
+## 米家链路升级：改用**官方模拟器**当被控端（2026-09-20 晚）
+
+上一节自写的模拟器只是权宜之计；官方模拟器其实还在，只是我上次只查了 0.5.12 就下了
+"已移除"的错误结论。**python-miio 0.6.0.dev0 里有官方模拟器**：
+
+    miio/devtools/simulators/miiosimulator.py + miotsimulator.py
+    miiocli devtools miio-simulator --file <YAML>      # 另有 miot-simulator
+
+设备描述是 YAML（字段照官方 pydantic 模型）：
+`name / models[{model,name}] / type / properties[{name,type,value,setter,min,max}] / methods[{name,result}]`
+本仓库自带一份：`pc_side/yeelight_lamp.yaml`（power/bright/ct 三个**带 setter 的属性**）。
+官方实现把令牌固定为全零（`miio/devtools/simulators/common.py`: `"token": 32 * "0"`），
+因此 S3 设备表里那一行也用全零。
+
+### 官方侧日志（未改一行官方代码）
+
+```
+INFO  MiioModel(model=yeelink.light.color3, name=Desk
+
+## 米家链路升级：改用**官方模拟器**当被控端（2026-09-20 晚）
+
+上一节自写的模拟器只是权宜之计；官方模拟器其实还在，只是我上次只查了 0.5.12 就下了
+"已移除"的错误结论。**python-miio 0.6.0.dev0 里有官方模拟器**：
+
+    miio/devtools/simulators/miiosimulator.py + miotsimulator.py
+    miiocli devtools miio-simulator --file <YAML>      # 另有 miot-simulator
+
+设备描述是 YAML（字段照官方 pydantic 模型）：
+`name / models[{model,name}] / type / properties[{name,type,value,setter,min,max}] / methods[{name,result}]`
+本仓库自带一份：`pc_side/yeelight_lamp.yaml`（power/bright/ct 三个**带 setter 的属性**）。
+官方实现把令牌固定为全零（`miio/devtools/simulators/common.py`: `"token": 32 * "0"`），
+因此 S3 设备表里那一行也用全零。
+
+### 官方侧日志（未改一行官方代码）
+
+```
+INFO  MiioModel(model='yeelink.light.color3', name='Desk Lamp')
+INFO  Miio push server started with address=0.0.0.0   server_id=706233514
+INFO  Got setter call with {'id': 25173, 'method': 'set_power',  'params': ['on', 'smooth', 500]}
+INFO  Got setter call with {'id': 21546, 'method': 'set_bright', 'params': [70, 'smooth', 500]}
+```
+
+### 从 S3 打它的结果（`model:"miio"`，全程局域网、不经云端）
+
+| 指令 | S3 返回 |
+|---|---|
+| lamp on | 台灯已打开 |
+| lamp brightness 70 | 台灯亮度已调到 70 |
+| lamp prop power | 台灯现在是开着的（**状态回读**） |
+
+**这一步把验证强度提上来了**：被控端是**官方实现**，不再是"我写的模拟器像不像设备"，
+而是"官方代码收下并执行了我客户端的指令"。裁判从我自己换成了 python-miio。
+
+### 仍未验证 / 未解决（口径不变）
+1. **真机零验证**：没有控制过任何真实小米设备（本节点亮的是官方模拟器，不是真灯）。
+2. **MIoT-spec（siid/piid）未实现**：目前只覆盖老式 miIO 方法（set_power/toggle/
+   set_bright/set_ct_abx/get_prop/miIO.info）。官方另有 `miot-simulator`，可用于
+   把这部分补齐。
+3. 板子侧 `ask` 后的间歇崩溃、S3 侧 `pppos_input_tcpip failed` 刷屏 —— 均未解决。
