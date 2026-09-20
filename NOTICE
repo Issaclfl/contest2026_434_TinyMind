@@ -1,0 +1,37 @@
+TinyMind-Audio
+Copyright 2026 TinyMind (队伍 434)
+
+本作品以 Apache License 2.0 发布，全文见 LICENSE。
+
+本仓库包含或改编了以下第三方内容，各自遵循其原始许可：
+
+1. openvela / Apache NuttX
+   许可：Apache-2.0
+   用到：NuttX 内核与 apps 的构建体系、audio upper-half 框架、PPP/网络栈、
+        LVGL 图形栈、FreeType。板级改动以 board/ 下的补丁与源文件形式给出。
+
+2. Espressif ESP-IDF 及其组件（esp_http_client、lwip、esp_wifi、led_strip、
+   mbedtls 等）
+   许可：Apache-2.0
+   用到：ESP32-S3 网关固件（board/sf32lb52_net/esp32s3_gateway）。
+
+3. MimiClaw (https://github.com/memovai/mimiclaw)
+   许可：MIT
+   用到：packages/ai_agent 的部分代码派生自它（详见该包内 NOTICE 与源码头部注释）。
+
+4. llama2.c (Andrej Karpathy)
+   许可：MIT
+   用到：board/sf32lb52_net/esp32s3_common/components/espllm 是 llama2.c 的
+        移植与量化版本；port_llama2.py 保留上游源码哈希并逐段改写。
+
+5. Noto Sans SC 字体子集
+   许可：SIL Open Font License 1.1
+   用到：板载屏幕中文显示（board/sf32lb52_audio/tools/subset_font.py 生成子集）。
+
+6. python-miio
+   许可：MIT
+   用到：仅作为**开发期依赖**用于被控端验证（官方模拟器）与协议对拍，
+        其代码未复制进本仓库。
+
+以下内容为开发过程中使用的云端服务，不属于本仓库分发的代码：
+小米 MiMo（云端大模型与 TTS）、火山引擎 TTS。相关凭据一律不随仓库分发。
