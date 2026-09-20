@@ -25,8 +25,10 @@
 
 import argparse
 import json
+import os
 import re
 import ssl
+import subprocess
 import threading
 import time
 import urllib.error
@@ -160,15 +162,202 @@ def ask_gateway(text):
     return doc["choices"][0]["message"]["content"], ms
 
 
-def add_event(kind, text, reply, ms, before=None, after=None):
+def console_alive(console, baud):
+    """板子的控制台还活着吗？敲一个回车，看它回不回显/提示符。"""
+    import serial
+
+    ser = serial.Serial()
+    ser.port, ser.baudrate, ser.timeout = console, baud, 0.15
+    ser.rtscts = ser.dsrdtr = False
+    ser.open()
+    try:
+        ser.reset_input_buffer()
+        ser.write(b"\r\n")
+        buf = b""
+        end = time.time() + 2.0
+        while time.time() < end:
+            buf += ser.read(4096)
+        return b"vela>" in buf or b"nsh>" in buf or len(buf) > 0
+    finally:
+        ser.close()
+
+
+def console_send(console, baud, line, wait=1.5):
+    """往板子控制台敲一行（不等待回显解析）。"""
+    import serial
+
+    ser = serial.Serial()
+    ser.port, ser.baudrate, ser.timeout = console, baud, 0.15
+    ser.rtscts = ser.dsrdtr = False
+    ser.open()
+    try:
+        ser.write(line.encode("utf-8") + b"\r\n")
+        time.sleep(wait)
+    finally:
+        ser.close()
+
+
+def board_restart(console, baud, sftool, image, revive_bin):
+    """把板子救回来：复位芯片 → 等它到 nsh> → 重拨 PPP → 起 Agent → 指到网关。
+
+    板子会进入"控制台不回显、答复不派发"的卡死状态（本项目实测过多次，**只有复位能解**）。
+    手工做要三五分钟：先 sftool 把芯片从下载态带出来，再一条条敲命令。演示时这一步
+    放在镜头外点一下就好，所以做成按钮。
+
+    返回 (是否成功, 过程说明)。
+    """
+    log = []
+
+    if sftool and os.path.isfile(sftool):
+        # 优先整包重烧：板子卡死时它最可靠（只写镜像头 4 KB 有时救不回来，
+        # 今天实测过两种结果都有）。整包约 5.7 MB、几分钟；演示前不该省这一步。
+        target = image if (image and os.path.isfile(image)) else revive_bin
+        cmd = [sftool, "-c", "SF32LB52", "-p", console, "-b", str(baud),
+               "--before", "default_reset", "--after", "soft_reset",
+               "write_flash", "%s@0x12010000" % target]
+        log.append("重烧 %s" % os.path.basename(target))
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        log.append("sftool rc=%d" % r.returncode)
+        if r.returncode != 0:
+            return False, "；".join(log + ["复位失败：%s" % r.stderr.strip()[:120]])
+    else:
+        return False, "未配置 sftool（启动时加 --sftool 指定路径）——请手动复位板子后重试"
+
+    # 等它起来
+    for _ in range(20):
+        time.sleep(1.5)
+        try:
+            if console_alive(console, baud):
+                break
+        except Exception:
+            continue
+
+    console_send(console, baud, "pppd /dev/ttyS0 460800 &", wait=6)
+    log.append("pppd 已下发")
+    console_send(console, baud, "ai_agent", wait=6)
+    log.append("ai_agent 已下发")
+    console_send(console, baud, "set_llm https://10.0.0.1/v1/chat/completions cmd local", wait=3)
+    log.append("set_llm 已下发")
+
+    try:
+        alive = console_alive(console, baud)
+    except Exception as exc:
+        alive = False
+        log.append("检查公告台失败：%s" % (exc,)[:80])
+    log.append("控制台%s" % ("有响应" if alive else "**仍无响应**"))
+    return alive, "；".join(log)
+
+
+def strip_ansi(text):
+    return re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text.replace("\r", ""))
+
+
+# 板子在思考时会先念一句提示语，那不是答案。
+THINKING_PHRASES = ("让我查一下", "稍等，处理中", "正在分析", "正在思考")
+
+AGENT_LINE = re.compile(r"\[Agent\]:\s*([^\n]*)")
+
+
+def agent_lines(raw):
+    return [m.strip().split("vela>")[0].strip() for m in AGENT_LINE.findall(raw)]
+
+
+def board_answer(raw):
+    """板子的**最终答复**：跳过思考提示语。没有答案就返回空串。
+
+    注意不要在这里回退到"最后一行"——思考提示语会让读取循环误以为已经答完了。
+    """
+    for line in reversed(agent_lines(raw)):
+        if line and not any(line.startswith(p) for p in THINKING_PHRASES):
+            return line
+    return ""
+
+
+def board_last_line(raw):
+    lines = agent_lines(raw)
+    return lines[-1] if lines else ""
+
+
+def board_ask(text, console, baud, wait=25.0, quiet=3.0):
+    """把这一句打进**板子的控制台**，把板子自己的回话读回来。
+
+    为什么这么做：主控是板子——屏和喇叭都在它那边。面板想让观众看到/听到设备被控制，
+    最直接的办法就是替人敲这一句 `ask`（和人在终端里敲的一模一样），然后在旁边等着
+    把板子的回话读回来显示。这不是绕过板子，恰恰是让板子走完整条链。
+
+    读的规矩（都踩过，所以写下来）：
+    1. **写之前等到串口彻底安静**（`quiet` 秒没有新字节）。板子一条命令的尾巴很长——
+       答复之后还有片段播报的那十几行、而且答复本身会打印两遍；不等它说完就发下一条，
+       会把上一条的残留当成这一条的答案（实测真的报错过）。
+    2. **丢掉与上一条答复相同的行**：同一句话打印两遍，第二遍正好落在下一条的窗口里。
+    3. **跳过思考提示语**（"让我查一下…"这类），那不是答案。
+
+    串口注意：开端口后**不动 DTR/RTS**。本板 RTS 接自动下载/复位电路，手工改电平会把
+    芯片按在 ROM 下载态，表现出来就是"只有回显、什么都不执行"。
+    """
+    import serial
+
+    ser = serial.Serial()
+    ser.port, ser.baudrate, ser.timeout = console, baud, 0.15
+    ser.rtscts = ser.dsrdtr = False
+    buf = b""
+    ser.open()
+    try:
+        # 1) 等到串口安静
+        drain_until = time.time() + 1.0
+        while time.time() < drain_until:
+            chunk = ser.read(8192)
+            if chunk:
+                buf += chunk
+                drain_until = time.time() + quiet
+
+        known = agent_lines(strip_ansi(buf.decode("utf-8", "replace")))
+        seen_answers = set(known) | {STATE.get("last_board_answer", "")}
+        ser.reset_input_buffer()
+
+        ser.write(("ask " + text).encode("utf-8") + b"\r\n")
+
+        t0 = time.time()
+        deadline = t0 + wait
+        answered_at, answer = None, ""
+        while time.time() < deadline:
+            chunk = ser.read(8192)
+            if chunk:
+                buf += chunk
+            lines = agent_lines(strip_ansi(buf.decode("utf-8", "replace")))
+            fresh = [l for l in lines
+                     if l and l not in seen_answers
+                     and not any(l.startswith(p) for p in THINKING_PHRASES)]
+            if fresh and answered_at is None:
+                answer, answered_at = fresh[0], time.time()
+                STATE["last_board_answer"] = fresh[0]
+            if answered_at is not None and time.time() - answered_at >= 1.5:
+                break
+
+        raw = strip_ansi(buf.decode("utf-8", "replace"))
+        if not answer:                      # 没等到答案：把最后一句提示语当诊断信息
+            tail = [l for l in agent_lines(raw) if l not in seen_answers]
+            answer = tail[-1] if tail else ""
+        return answer, raw, int((time.time() - t0) * 1000)
+    finally:
+        ser.close()
+
+
+def clip_played(raw):
+    """板子实际播的离线片段名（有的话）——它是"板子真的出声了"的证据。"""
+    hits = re.findall(r"clip '([^']+)'", raw)
+    return hits[-1] if hits else ""
+
+
+def add_event(kind, text, reply, ms, before=None, after=None, via=""):
     with STATE["lock"]:
-        if kind == "panel":
-            # 记下自己刚发的句子：网关的 /status 只看得到"最近一次问句"，
-            # 分不清是板子经 PPP 问的还是面板问的，下面用它来避免误记成板子。
+        if kind == "panel" or via.startswith("面板代问"):
+            # 记下这一句：网关的 /status 只看得到"最近一次问句"，分不清是板子
+            # 经 PPP 问的还是面板代问的，下面用它来避免重复记一条。
             STATE["recent_panel"][text] = time.time()
         STATE["events"].insert(0, {
             "at": time.strftime("%H:%M:%S"), "kind": kind, "text": text,
-            "reply": reply, "ms": ms,
+            "reply": reply, "ms": ms, "via": via,
             "before": before, "after": after,
             "delta": device_delta(before, after),
         })
@@ -249,7 +438,9 @@ def snapshot():
     with STATE["lock"]:
         events = list(STATE["events"])
     return {"gateway": gw, "devices": devices, "events": events,
-            "gateway_ip": STATE["gateway"], "miio": STATE["miio_ip"]}
+            "gateway_ip": STATE["gateway"], "miio": STATE["miio_ip"],
+            "board_console": STATE.get("board_console", ""),
+            "can_reset": bool(STATE.get("sftool"))}
 
 
 PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -281,7 +472,7 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 </style></head><body><div class="wrap">
 <h1>TinyMind 演示面板</h1>
 <div class="sub">板子（黄山派）· 网关（ESP32-S3）· 被控端（米家设备）—— 同屏看全。
-命令走的是<b>和板子完全同一条离线路径</b>：网关上的本地分类器 → 局域网 miIO。</div>
+命令走的是<b>和板子完全同一条离线路径</b>：网关上的本地分类器 → 局域网 miIO。<span id="mode"></span></div>
 
 <div class="grid">
   <div class="card"><h2>网关 / 链路</h2><div id="gw"></div></div>
@@ -291,6 +482,8 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
       <button type="submit">发送</button>
     </form>
     <div class="btns" id="quick"></div>
+    <div class="btns"><button id="resetbtn" onclick="boardReset()" style="display:none">
+      ↻ 复位板子并重连（约 40 秒；板子卡死时点这个）</button></div>
     <div class="row" style="margin-top:10px"><span class="k">最近答复</span><span class="v" id="last"></span></div>
   </div>
 </div>
@@ -313,6 +506,12 @@ async function say(e){e.preventDefault();const q=document.getElementById('q');
 async function tick(){
  try{const s=await (await fetch('/api/state')).json();
   const g=s.gateway||{};
+  document.getElementById('mode').innerHTML = s.board_console
+    ? '　<b class="on">控制方式：由板子执行</b>（面板替你敲 ask，屏与喇叭都在板子上）'
+    : '　<b class="off">控制方式：面板直接问网关 —— 板子不参与，屏与喇叭不会有反应</b>'+
+      '（启动时加 --board-console COM5 可改为由板子执行）';
+  var rb=document.getElementById('resetbtn');
+  if(rb) rb.style.display = s.can_reset ? '' : 'none';
   document.getElementById('gw').innerHTML=
    row('网关地址',esc(s.gateway_ip))+
    row('本地模型',esc((g.model||'—').slice(0,40)))+
@@ -342,11 +541,22 @@ async function tick(){
    '<span class="src '+(e.kind==='board'?'board':'panel')+'">'+(e.kind==='board'?'板子':'面板')+'</span>'+
    '<span>'+esc(e.text)+' → <b>'+esc(e.reply)+'</b>'+
    (e.ms!=null?' <code>'+e.ms+' ms</code>':'')+
+   (e.via?' <span class="note">'+esc(e.via)+'</span>':'')+
    (e.delta?'<br><span class="delta">设备变化：'+esc(e.delta)+'</span>':'')+'</span></div>').join('')
    ||'<div class="k">还没有事件</div>';
  }catch(err){document.getElementById('gw').innerHTML='<span class="err">面板内部错误：'+esc(err)+'</span>';}
 }
 function row(k,v){return '<div class="row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>'}
+async function boardReset(){
+  document.getElementById('resetbtn').disabled=true;
+  document.getElementById('last').innerHTML='<i class="k">正在复位板子并重连（约 40 秒，别动串口）…</i>';
+  try{const r=await (await fetch('/api/board-reset',{method:'POST'})).json();
+    document.getElementById('last').innerHTML = r.ok
+      ? '<span class="on">板子已就绪，试一句看看</span>'
+      : '<span class="err">复位后仍无响应：'+esc(r.detail)+'</span>';
+  }catch(e){document.getElementById('last').innerHTML='<span class="err">复位失败：'+esc(e)+'</span>';}
+  document.getElementById('resetbtn').disabled=false; tick();
+}
 async function send(t){document.getElementById('last').innerHTML='<i class="k">执行中…</i>';
  await fetch('/api/say',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({text:t})}); tick();}
@@ -376,6 +586,20 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, "not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
+        if self.path.startswith("/api/board-reset"):
+            try:
+                ok, detail = board_restart(STATE["board_console"], STATE["board_baud"],
+                                           STATE["sftool"], STATE["image"],
+                                           STATE["revive_bin"])
+            except Exception as exc:
+                ok, detail = False, "%s" % (exc,)[:200]
+            add_event("panel", "面板按钮：复位板子并重连",
+                      ("板子已就绪" if ok else "复位后仍无响应") + "（" + detail + "）",
+                      None, None, None, via="面板操作")
+            return self._send(200, json.dumps({"ok": ok, "detail": detail},
+                                              ensure_ascii=False),
+                              "application/json; charset=utf-8")
+
         if not self.path.startswith("/api/say"):
             return self._send(404, "not found", "text/plain; charset=utf-8")
 
@@ -389,17 +613,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, json.dumps({"error": "empty"}), "application/json")
 
         before = [dict(d, state=device_state(d)) for d in STATE["devices"]]
-        try:
-            reply, ms = ask_gateway(text)
-            err = None
-        except Exception as exc:
-            reply, ms, err = "网关没有回应", None, "%s" % (exc,)[:150]
+        console = STATE.get("board_console")
+        via = ""
+
+        if console:
+            # 走板子：面板替人敲 `ask`，让**板子**去问网关——屏和喇叭因此参与进来。
+            try:
+                reply, raw, relay_ms = board_ask(text, console, STATE["board_baud"])
+                reply = reply or "(板子没回话：确认它停在 vela> 且已 set_llm … cmd)"
+                clip = clip_played(raw)
+                via = "面板代问 · 板子播报 clip '%s'" % clip if clip else \
+                      "面板代问（板子出的屏与声）"
+                ms, err = relay_ms, None
+            except Exception as exc:
+                reply, ms, via = "板子控制台打不开", None, ""
+                err = "%s（可能被别的终端占用）" % (exc,)[:120]
+        else:
+            try:
+                reply, ms = ask_gateway(text)
+                err = None
+            except Exception as exc:
+                reply, ms, err = "网关没有回应", None, "%s" % (exc,)[:150]
+
         time.sleep(0.4)                       # 给模拟器留一拍再读状态
         after = [dict(d, state=device_state(d)) for d in STATE["devices"]]
-        add_event("panel", text, reply if err is None else "网关没有回应: " + err,
-                  ms, before, after)
-        return self._send(200, json.dumps({"reply": reply, "ms": ms, "error": err},
-                                          ensure_ascii=False),
+        add_event("board" if console else "panel", text,
+                  reply if err is None else "%s: %s" % (reply, err),
+                  ms, before, after, via)
+        return self._send(200, json.dumps({"reply": reply, "ms": ms, "error": err,
+                                           "via": via}, ensure_ascii=False),
                           "application/json; charset=utf-8")
 
 
@@ -454,11 +696,28 @@ def main():
     ap.add_argument("--token", default=SIM_TOKEN, help="设备 token（默认为官方模拟器的全零常量）")
     ap.add_argument("--sdkconfig", default="",
                     help="可选：从这份 sdkconfig 读设备表（只读名称与型号，不打印 token）")
+    ap.add_argument("--board-console", default="",
+                    help="板子的控制台串口（例如 COM5）。给了它就由面板替人敲 `ask`——"
+                         "这样屏和喇叭都由板子出；不给则面板直接问网关（板子不参与）")
+    ap.add_argument("--board-baud", type=int, default=1000000,
+                    help="板子控制台波特率（默认 1000000）")
+    ap.add_argument("--sftool", default="",
+                    help="sftool 的路径。给了它面板就能一键把卡死的板子复位并重连"
+                         "（板子会进入控制台不回显/答复不派发的卡死状态，只有复位能解）")
+    ap.add_argument("--image", default="",
+                    help="板子固件镜像（配合 --revive-bin 从镜像里取前 4 KB 做复位）")
+    ap.add_argument("--revive-bin", default="head4k.bin",
+                    help="复位用的 4 KB 片段文件（默认当前目录的 head4k.bin）")
     args = ap.parse_args()
 
     STATE["gateway"] = args.gateway
     STATE["scheme"] = ("https://" if args.https else "http://") + args.gateway
     STATE["miio_ip"] = args.miio_ip
+    STATE["board_console"] = args.board_console
+    STATE["board_baud"] = args.board_baud
+    STATE["sftool"] = args.sftool
+    STATE["image"] = args.image
+    STATE["revive_bin"] = args.revive_bin
     STATE["miio_token"] = args.token
     STATE["devices"] = load_devices(args.sdkconfig) if args.sdkconfig else \
         mark_sharing([dict(d, ip=args.miio_ip, token=args.token)
@@ -469,6 +728,11 @@ def main():
           "全零常量" if args.token == SIM_TOKEN else "已提供"))
     print("设备    : %s" % ", ".join("%s(%s)" % (d["label"], d["model"]) for d in STATE["devices"]))
     print("面板    : http://127.0.0.1:%d" % args.port)
+    if args.board_console:
+        print("控制方式: 打到板子控制台 %s —— 屏与喇叭由板子出" % args.board_console)
+    else:
+        print("控制方式: 面板直接问网关（**板子不参与**，屏与喇叭不会有反应）")
+        print("          想让板子出屏与声：加 --board-console COM5（板子要停在 vela> 并已 set_llm … cmd）")
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
 
 
