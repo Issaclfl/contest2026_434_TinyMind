@@ -144,6 +144,99 @@ NEW_FAMILIES = {
 
 HELD_OUT |= set(NEW_FAMILIES) | {"blinkw"}
 
+# ---- 中文说法 + 米家动作（2026-09-20）----------------------------------------
+# 两条原则：
+#   1) **输出永远是 ASCII 的闭集 JSON**，中文只出现在输入侧；设备在 JSON 里是逻辑名
+#      （lamp），由 S3 的设备表映射到真实 IP/token，板子不参与。
+#   2) 中文的留出集才是演示真正要看的那个数，所以中文族单独命名（zh_*）：
+#      整族留出几个，其余族留出"最后一个说法"（后者比整族弱一档，如实标注）。
+#
+# 模糊表达**刻意**进语料：小模型必须学会"调暗一点 -> 30"这种映射，
+# 而不是指望用户报数字。
+ZH_LAMP = ["台灯", "灯"]
+# 整族留出的中文族：模型完全没见过这些说法。演示是中文的，所以
+# **中文留出集的准确率才是要看的那个数**，其余中文族只留出"最后一个说法"。
+ZH_STRONG_HELD = {"zh_off", "zh_bright_dim"}
+HELD_OUT |= ZH_STRONG_HELD
+MIIO_DEV = "lamp"
+EN_DEV = "lamp"
+
+
+def miio(op, **kw):
+    a = {"action": "miio", "device": MIIO_DEV, "op": op}
+    a.update(kw)
+    return a
+
+
+def en_miio(op, **kw):
+    a = {"action": "miio", "device": EN_DEV, "op": op}
+    a.update(kw)
+    return a
+
+
+# 每族：(模板列表, 造动作, 槽位组合)。模板里 {d} 设备词、{v} 数值。
+ZH_FAMILIES = {
+    "zh_on": (["打开{d}", "把{d}打开", "开一下{d}", "帮我打开{d}", "把{d}点开"],
+              lambda d=None, v=None: miio("on"),
+              lambda: [(d, None) for d in ZH_LAMP]),
+    "zh_off": (["关掉{d}", "把{d}关掉", "关一下{d}", "把{d}关了"],
+               lambda d=None, v=None: miio("off"),
+               lambda: [(d, None) for d in ZH_LAMP]),
+    "zh_toggle": (["{d}切换一下", "把{d}切一下", "{d}给我切一下"],
+                  lambda d=None, v=None: miio("toggle"),
+                  lambda: [(d, None) for d in ZH_LAMP]),
+    # 数字形态：学"数到值"的对应
+    "zh_bright": (["把{d}亮度调到{v}", "亮度调到{v}", "{d}亮度设成{v}", "把{d}调到{v}"],
+                  lambda d=None, v=None: miio("brightness", value=v),
+                  lambda: [(d, v) for d in ZH_LAMP for v in [20, 30, 50, 80, 100]]),
+    # 模糊形态：学"调暗一点 -> 30"这类映射（演示时最可能出现的就是这种话）
+    "zh_bright_dim": (["调暗一点", "{d}调暗一点", "把{d}调暗点", "{d}太亮了"],
+                      lambda d=None, v=None: miio("brightness", value=30),
+                      lambda: [(d, None) for d in ZH_LAMP]),
+    "zh_bright_up": (["亮一点", "{d}亮一点", "把{d}调亮点", "{d}有点暗"],
+                     lambda d=None, v=None: miio("brightness", value=80),
+                     lambda: [(d, None) for d in ZH_LAMP]),
+    "zh_ct": (["把{d}色温调到{v}", "色温设成{v}", "{d}色温{v}"],
+              lambda d=None, v=None: miio("color_temp", value=v),
+              lambda: [(d, v) for d in ZH_LAMP for v in [2700, 4000, 6000]]),
+    # 色温的人话（"调暖""冷白"）——与亮度那两组一样，考的是"词到值"的映射
+    "zh_ct_warm": (["把{d}调暖一点", "{d}调暖", "把{d}调成暖光"],
+                   lambda d=None, v=None: miio("color_temp", value=2700),
+                   lambda: [(d, None) for d in ZH_LAMP]),
+    "zh_ct_cool": (["把{d}调冷一点", "{d}调冷白", "把{d}调成冷光"],
+                   lambda d=None, v=None: miio("color_temp", value=6000),
+                   lambda: [(d, None) for d in ZH_LAMP]),
+    "zh_info": (["{d}现在什么状态", "看看{d}的状态", "{d}开着吗", "{d}状态怎么样"],
+                lambda d=None, v=None: miio("info"),
+                lambda: [(d, None) for d in ZH_LAMP]),
+}
+
+# 英文也给一份米家动作（英文模型那条线同样受益，且便于对照）
+EN_MIIO = {
+    "mm_on": (["turn on the desk lamp", "switch the lamp on", "lamp on"],
+              lambda: en_miio("on"), lambda: [(None, None)]),
+    "mm_off": (["turn off the desk lamp", "switch the lamp off", "lamp off"],
+               lambda: en_miio("off"), lambda: [(None, None)]),
+    "mm_bright": (["set the lamp brightness to {v}", "dim the lamp to {v} percent"],
+                  lambda: None, lambda: [(v, None) for v in [20, 30, 50, 80, 100]]),
+    "mm_ct": (["make the lamp warmer", "set the lamp to warm white"],
+              lambda: en_miio("color_temp", value=2700), lambda: [(None, None)]),
+}
+
+# 中文侧的既有动作（状态/时间/天气/温度/该问云端），演示用得到
+ZH_LOCAL = {
+    "zh_status": (["你现在的状态", "系统状态怎么样", "报一下状态"],
+                  lambda: {"action": "status"}, lambda: [(None,)]),
+    "zh_time": (["现在几点", "几点了", "现在什么时间"],
+                lambda: {"action": "time"}, lambda: [(None,)]),
+    "zh_temperature": (["芯片温度多少", "芯片热不热", "现在的温度"],
+                       lambda: {"action": "temperature"}, lambda: [(None,)]),
+    "zh_weather": (["{city}天气怎么样", "今天{city}天气", "{city}下雨吗"],
+                   lambda: None, lambda: [(c,) for c in ["北京", "上海", "广州", "深圳"]]),
+    "zh_ask": (["讲个笑话", "什么是单片机", "珠穆朗玛峰有多高", "为什么天是蓝的"],
+               lambda: {"action": "ask"}, lambda: [(None,)]),
+}
+
 
 def target_words(t):
     return {"gateway": ["gateway", "router"], "internet": ["internet", "web"],
@@ -195,6 +288,38 @@ def build():
             for c, n, city in combos():
                 text = tmpl.format(c=c, n=n, city=city) if ("{" in tmpl) else tmpl
                 items.append((family, text, make_act(c, n, city)))
+    # 中文说法 + 米家动作：每族留出"最后一个说法"（weak held-out），
+    # zh_off / zh_bright_dim 整族留出（strong held-out，演示要看的那个数）
+    for fam, (tmpls, make_act, combos) in ZH_FAMILIES.items():
+        strong = fam in ZH_STRONG_HELD
+        for i, tmpl in enumerate(tmpls):
+            if strong:
+                family = fam          # 整族进留出集
+            else:
+                family = fam if i == len(tmpls) - 1 else fam + "_tr"
+            for d, v in combos():
+                items.append((family, tmpl.format(d=d, v=v), make_act(d, v)))
+
+    for fam, (tmpls, make_act, combos) in EN_MIIO.items():
+        for i, tmpl in enumerate(tmpls):
+            family = fam if i == len(tmpls) - 1 else fam + "_tr"
+            for a, b in combos():
+                if fam == "mm_bright":
+                    text = tmpl.format(v=a)
+                    items.append((family, text, en_miio("brightness", value=a)))
+                else:
+                    items.append((family, tmpl, make_act()))
+
+    for fam, (tmpls, make_act, combos) in ZH_LOCAL.items():
+        for i, tmpl in enumerate(tmpls):
+            family = fam if i == len(tmpls) - 1 else fam + "_tr"
+            for (city,) in combos():
+                if fam == "zh_weather":
+                    items.append((family, tmpl.format(city=city),
+                                  {"action": "weather", "city": city}))
+                else:
+                    items.append((family, tmpl, make_act()))
+
     return items
 
 
@@ -220,8 +345,13 @@ def main():
         for r in rows:
             out.append(r)
             t = r["cmd"]
-            variants = [t.capitalize(), t.upper() if rnd.random() < 0.15 else t,
-                        t + "?", t + " please", "  " + t + "  ", t.replace(" ", "  ")]
+            if any("一" <= ch <= "鿿" for ch in t):
+                # 中文：写法差异（句读、语气词、空格）—— ASR 转写通常不带标点
+                variants = [t + "。", t + "，谢谢", "请" + t, t + "吧",
+                            "  " + t + "  ", t.replace("，", "")]
+            else:
+                variants = [t.capitalize(), t.upper() if rnd.random() < 0.15 else t,
+                            t + "?", t + " please", "  " + t + "  ", t.replace(" ", "  ")]
             for v in rnd.sample(variants, min(a.augment, len(variants))):
                 out.append({"cmd": v, "json": r["json"], "family": r["family"]})
         return out
@@ -241,7 +371,13 @@ def main():
     acts = {}
     for r in train + held:
         acts[r["json"]] = acts.get(r["json"], 0) + 1
-    stats = [f"训练 {len(train)} 条 / 留出 {len(held)} 条（整族留出：{sorted(HELD_OUT)}）",
+    def is_zh(t):
+        return any("一" <= ch <= "鿿" for ch in t)
+
+    zh_tr = sum(1 for r in train if is_zh(r["cmd"]))
+    zh_he = sum(1 for r in held if is_zh(r["cmd"]))
+    stats = [f"训练 {len(train)} 条（中文 {zh_tr}） / 留出 {len(held)} 条（中文 {zh_he}）",
+             f"整族留出：{sorted(HELD_OUT)}",
              f"动作种类 {len(acts)}"]
     for k in sorted(acts):
         stats.append(f"  {acts[k]:>4}  {k}")
