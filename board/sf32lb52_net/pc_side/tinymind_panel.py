@@ -279,7 +279,7 @@ def board_last_line(raw):
     return lines[-1] if lines else ""
 
 
-def board_ask(text, console, baud, wait=25.0, quiet=3.0):
+def board_ask(text, console, baud, wait=35.0, quiet=3.0):
     """把这一句打进**板子的控制台**，把板子自己的回话读回来。
 
     为什么这么做：主控是板子——屏和喇叭都在它那边。面板想让观众看到/听到设备被控制，
@@ -321,18 +321,24 @@ def board_ask(text, console, baud, wait=25.0, quiet=3.0):
         t0 = time.time()
         deadline = t0 + wait
         answered_at, answer = None, ""
+        # 这一轮已经见过的行：buf 是累加的，同一个答复每轮读都会再出现一次；
+        # 不去重的话"新行"永远存在，计时器一直被重置，要等满 wait 才退出。
+        round_seen = set(seen_answers)
         while time.time() < deadline:
             chunk = ser.read(8192)
             if chunk:
                 buf += chunk
             lines = agent_lines(strip_ansi(buf.decode("utf-8", "replace")))
             fresh = [l for l in lines
-                     if l and l not in seen_answers
+                     if l and l not in round_seen
                      and not any(l.startswith(p) for p in THINKING_PHRASES)]
-            if fresh and answered_at is None:
-                answer, answered_at = fresh[0], time.time()
-                STATE["last_board_answer"] = fresh[0]
-            if answered_at is not None and time.time() - answered_at >= 1.5:
+            if fresh:
+                round_seen.update(fresh)
+                # 取**最后**一条：一条 ask 的回话是"提示语 → 真答复"的顺序，
+                # 第一条能拿到的是提示语（实测就把"让我查一下…"记成了答复）。
+                answer, answered_at = fresh[-1], time.time()
+                STATE["last_board_answer"] = answer
+            if answered_at is not None and time.time() - answered_at >= 2.5:
                 break
 
         raw = strip_ansi(buf.decode("utf-8", "replace"))

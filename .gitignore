@@ -3,3 +3,7 @@
 # repository does commit (see its own note about logs/).
 __pycache__/
 *.pyc
+
+# 生成物（由 tools/make_voice_clips.py 产出）：片段本身是 .pcm，随 romfs 打包，
+# 这个头文件是最早「把片段编进固件」那版的遗留，代码里已无人引用。
+board/sf32lb52_audio/clips/voice_clips.h
