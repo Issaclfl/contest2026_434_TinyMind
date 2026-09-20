@@ -1,0 +1,870 @@
+第 9 批：状态屏改版 + 板载 RGB 灯中文播报。依赖：0005、0006、0007、0008。
+
+屏幕（agent_screen.c/.h 为整文件替换，应用前先删旧文件再打本补丁）：白底深字、
+正文 34px、顶部状态条、五行真实状态（最近指令 / 网关链路 / 本地模型 / 播报 / 已执行）。
+链路行来自 getifaddrs()，模型与调用次数来自 LLM 路由，指令与播报由调用方喂入。
+voice_say.c：播报表加 RGB 灯句（片段由 tools/make_voice_clips.py 新增 7 条，共 23 条），
+播完片段通知屏幕；nsh_commands.c：ask 时把用户那句话交给屏幕。
+
+--- /dev/null
++++ b/packages/ai_agent/src/ui/agent_screen.c
+@@ -0,0 +1,753 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/* agent_screen.c - the board's status screen.
++ *
++ * A 390x450 panel (CO5300 AMOLED): a white status bar with the link dot and
++ * the uptime, the announcement in a big card, and five rows of live machine
++ * state underneath -- the command the user just gave, the PPP link, the model
++ * the board is routed to, the last announcement played from the image, and how
++ * many commands the router has served.
++ *
++ * White background and 34 px body text on purpose: this screen is filmed, and
++ * the first version (dark blue, 22 px) was unreadable on camera.  Everything
++ * shown is a real reading -- the link row comes from getifaddrs(), the model
++ * and the call count from the LLM router, the announcement row from the clip
++ * player.  Nothing on this screen is decorative.
++ *
++ * Bring-up mirrors apps/examples/lvgldemo: lv_init(), lv_nuttx_dsc_init()
++ * with the framebuffer and touch nodes, lv_nuttx_init(), then a task that
++ * pumps lv_timer_handler().  It runs in its own thread for two reasons: the
++ * LCD/touch nodes are registered by a deferred board task (so they may not
++ * exist when the agent boots), and LVGL is single-threaded, so the thread
++ * that initialises it is the one that must call into it.  Writers only touch
++ * plain strings under a mutex; every LVGL call happens in that one thread.
++ *
++ * Text is rendered with a FreeType CJK font subset shipped in the romfs
++ * (/etc/fonts/NotoSansSC-sub.ttf, GB2312 level 1+2).  LVGL's built-in
++ * lv_font_simsun_16_cjk is only a fallback: its glyph set is a thin,
++ * arbitrary subset and common characters came out as boxes.
++ */
++
++#include "ui/agent_screen.h"
++
++#include "agent_compat.h"
++#include "agent_config.h"
++#include "llm/llm_router.h"
++
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <ifaddrs.h>
++#include <netinet/in.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <syslog.h>
++#include <time.h>
++#include <unistd.h>
++
++#ifdef CONFIG_GRAPHICS_LVGL
++
++#include <pthread.h>
++
++#include <lvgl/lvgl.h>
++
++#include <nuttx/timers/pwm.h>
++
++#if LV_USE_FREETYPE
++#include <lvgl/src/libs/freetype/lv_freetype.h>
++#endif
++
++static const char* TAG = "screen";
++
++#define SCREEN_BL_DEV "/dev/pwm0" /* GPTIM1_CH4 on PA01 -> LCD backlight */
++#define SCREEN_BL_FREQ 1000
++#define SCREEN_BL_REASSERT_MS 5000
++
++/* Keep the panel lit.  The backlight is a plain PWM, and anything that pokes
++ * /dev/pwm0 (a tool call, another app) can leave the screen dark; re-asserting
++ * the duty periodically makes the status screen survive that. */
++
++static void backlight_set(int level)
++{
++    struct pwm_info_s info;
++    int fd = open(SCREEN_BL_DEV, O_RDWR);
++
++    if (fd < 0) {
++        return;
++    }
++
++    memset(&info, 0, sizeof(info));
++    info.frequency = SCREEN_BL_FREQ;
++    info.duty = (ub16_t)(((uint32_t)level * 65535u) / 100u);
++
++    ioctl(fd, PWMIOC_SETCHARACTERISTICS, (unsigned long)(uintptr_t)&info);
++    ioctl(fd, PWMIOC_START, 0);
++    close(fd); /* the output keeps running: close only drops a reference */
++}
++
++#define SCREEN_TEXT_MAX 512
++#define SCREEN_ROW_MAX 96
++#define SCREEN_TASK_STACK 32768 /* LVGL + FreeType want a roomy stack */
++#define SCREEN_WAIT_MS 20000    /* how long to wait for the display node */
++#define SCREEN_TICK_MS 1000     /* how often the live rows are re-read */
++#define SCREEN_ROWS 5
++
++/* Palette: white page, dark ink. */
++
++#define COL_BG 0xffffff
++#define COL_INK 0x16181d
++#define COL_DIM 0x6b7280
++#define COL_RULE 0xe3e6ea
++#define COL_CARD 0xf3f5f8
++#define COL_OK 0x1b8f3a
++#define COL_BAD 0xc0392b
++
++/* Type scale: the announcement, the bar title, and the status rows.  All three
++ * come from the same CJK font at different sizes. */
++
++#define SCREEN_BODY_PX 34
++#define SCREEN_MID_PX 21
++#define SCREEN_SMALL_PX 18
++
++/* Vertical metrics, in panel rows: bar, gap, card, gap, then five rows. */
++
++#define SCREEN_BAR_H 56
++#define SCREEN_GAP 12
++#define SCREEN_CARD_PCT 38 /* of the panel height */
++
++static lv_obj_t* s_body;
++static lv_obj_t* s_rows[SCREEN_ROWS];
++static lv_obj_t* s_dot;
++static lv_obj_t* s_uptime;
++static lv_font_t* s_font; /* announcement text */
++static lv_font_t* s_font_md; /* bar title */
++static lv_font_t* s_font_sm; /* rows */
++static pthread_t s_task;
++static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/* What the screen shows.  The writers fill these in; the LVGL thread drains
++ * them.  `cmds` counts the commands the board has taken since boot. */
++
++static char s_body_text[SCREEN_TEXT_MAX];
++static char s_prompt[SCREEN_ROW_MAX];
++static char s_clip[SCREEN_ROW_MAX];
++static unsigned s_cmds;
++static bool s_body_waiting;
++static bool s_prompt_waiting;
++static bool s_clip_waiting;
++static char s_fb_path[64];
++static char s_input_path[64];
++static char s_font_path[80];
++static volatile bool s_running;
++static bool s_inited;
++
++/* Pick the best font available on this build, degrading loudly if needed. */
++
++static void font_setup(void)
++{
++#if LV_USE_FREETYPE
++    if (s_font_path[0] && access(s_font_path, F_OK) == 0) {
++        /* "already initialised" is not a failure: another component of the
++         * system may have brought FreeType up first, and we can still create
++         * our own font on top of it. */
++
++        lv_result_t init_res = lv_freetype_init(LV_FREETYPE_CACHE_FT_GLYPH_CNT);
++        if (init_res != LV_RESULT_OK) {
++            syslog(LOG_INFO, "[%s] lv_freetype_init: %d (continuing)\n", TAG,
++                init_res);
++        }
++
++        s_font = lv_freetype_font_create(s_font_path,
++            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, SCREEN_BODY_PX,
++            LV_FREETYPE_FONT_STYLE_NORMAL);
++        s_font_md = lv_freetype_font_create(s_font_path,
++            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, SCREEN_MID_PX,
++            LV_FREETYPE_FONT_STYLE_NORMAL);
++        s_font_sm = lv_freetype_font_create(s_font_path,
++            LV_FREETYPE_FONT_RENDER_MODE_BITMAP, SCREEN_SMALL_PX,
++            LV_FREETYPE_FONT_STYLE_NORMAL);
++
++        if (s_font && s_font_md && s_font_sm) {
++            syslog(LOG_INFO, "[%s] FreeType font: %s (%d/%d/%d px)\n", TAG,
++                s_font_path, SCREEN_BODY_PX, SCREEN_MID_PX, SCREEN_SMALL_PX);
++        } else {
++            syslog(LOG_WARNING, "[%s] FreeType could not open %s\n", TAG,
++                s_font_path);
++        }
++    } else {
++        syslog(LOG_WARNING, "[%s] no font at %s\n", TAG, s_font_path);
++    }
++#endif
++
++#if LV_FONT_SIMSUN_16_CJK
++    if (!s_font || !s_font_sm) {
++        /* Thin glyph set: some Chinese will still come out as boxes. */
++        s_font = (lv_font_t*)&lv_font_simsun_16_cjk;
++        s_font_md = s_font;
++        s_font_sm = s_font;
++        syslog(LOG_WARNING, "[%s] falling back to built-in simsun subset\n", TAG);
++    }
++#endif
++
++    if (!s_font || !s_font_md || !s_font_sm) {
++        s_font = (lv_font_t*)&lv_font_montserrat_14;
++        s_font_md = s_font;
++        s_font_sm = s_font;
++        syslog(LOG_WARNING, "[%s] falling back to montserrat: no CJK\n", TAG);
++    }
++
++    /* Anything the CJK font lacks (rare) still gets a chance.  In this LVGL
++     * version the fallback is a struct field, not a setter. */
++
++    s_font->fallback = &lv_font_montserrat_14;
++}
++
++static lv_obj_t* make_label(lv_obj_t* parent, const char* text, lv_font_t* font,
++    lv_color_t color)
++{
++    lv_obj_t* lbl = lv_label_create(parent);
++    lv_label_set_text(lbl, text);
++    lv_obj_set_style_text_font(lbl, font, 0);
++    lv_obj_set_style_text_color(lbl, color, 0);
++    return lbl;
++}
++
++/* One status row: label on the left, value on the right, hairline under it.
++ * The rows are plain objects, nothing interactive, so there is nothing to
++ * fail at runtime. */
++
++static lv_obj_t* make_row(lv_obj_t* parent, const char* name, int width,
++    int height)
++{
++    lv_obj_t* row = lv_obj_create(parent);
++    lv_obj_set_size(row, width, height);
++    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
++    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
++    lv_obj_set_style_border_width(row, 1, 0);
++    lv_obj_set_style_border_color(row, lv_color_hex(COL_RULE), 0);
++    lv_obj_set_style_radius(row, 0, 0);
++    lv_obj_set_style_pad_all(row, 0, 0);
++    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
++
++    lv_obj_t* key = make_label(row, name, s_font_sm, lv_color_hex(COL_DIM));
++    lv_obj_align(key, LV_ALIGN_LEFT_MID, 4, 0);
++
++    return row;
++}
++
++/* The five rows, in the order they are built below. */
++
++enum {
++    ROW_PROMPT = 0, /* 最近指令 */
++    ROW_LINK, /* 网关链路 */
++    ROW_MODEL, /* 本地模型 */
++    ROW_CLIP, /* 播报 */
++    ROW_CALLS, /* 已执行 */
++};
++
++static const char* kRowNames[SCREEN_ROWS] = {
++    "最近指令", "网关链路", "本地模型", "播报", "已执行",
++};
++
++/* Live readings.  All of them are cheap: getifaddrs() is a few ioctls, the
++ * router getter copies a struct under a mutex, and the clock is the clock. */
++
++/* First non-loopback IPv4 address and its interface name.  This is the link
++ * row: with the PPP session up the board has 10.0.0.2 and the gateway is
++ * whatever the point-to-point destination says. */
++
++static bool link_reading(char* ip, size_t ip_len, char* ifname, size_t ifname_len,
++    char* peer, size_t peer_len)
++{
++    struct ifaddrs* list = NULL;
++    bool found = false;
++
++    ip[0] = '\0';
++    peer[0] = '\0';
++    ifname[0] = '\0';
++
++    if (getifaddrs(&list) != 0) {
++        return false;
++    }
++
++    for (struct ifaddrs* ifa = list; ifa != NULL; ifa = ifa->ifa_next) {
++        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET) {
++            continue;
++        }
++
++        if (ifa->ifa_name != NULL && strncmp(ifa->ifa_name, "lo", 2) == 0) {
++            continue;
++        }
++
++        struct sockaddr_in* sin = (struct sockaddr_in*)ifa->ifa_addr;
++        uint32_t addr = ntohl(sin->sin_addr.s_addr);
++
++        if (addr == 0 || (addr >> 24) == 127) {
++            continue; /* interface exists but has no address yet */
++        }
++
++        inet_ntop(AF_INET, &sin->sin_addr, ip, ip_len);
++
++        if (ifa->ifa_name != NULL) {
++            snprintf(ifname, ifname_len, "%s", ifa->ifa_name);
++        }
++
++        if (peer != NULL && ifa->ifa_dstaddr != NULL
++            && ifa->ifa_dstaddr->sa_family == AF_INET) {
++            struct sockaddr_in* dst = (struct sockaddr_in*)ifa->ifa_dstaddr;
++            uint32_t p = ntohl(dst->sin_addr.s_addr);
++            if (p != 0 && (p >> 24) != 127) {
++                inet_ntop(AF_INET, &dst->sin_addr, peer, peer_len);
++            }
++        }
++
++        found = true;
++        break;
++    }
++
++    freeifaddrs(list);
++    return found;
++}
++
++/* "0:12:34" -- uptime, not wall clock: this board has no RTC and a wrong
++ * date on screen is worse than none. */
++
++static void uptime_text(char* out, size_t out_len)
++{
++    struct timespec ts;
++    unsigned long secs;
++
++    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
++        snprintf(out, out_len, "--:--:--");
++        return;
++    }
++
++    secs = (unsigned long)ts.tv_sec;
++    snprintf(out, out_len, "%lu:%02lu:%02lu", secs / 3600, (secs / 60) % 60,
++        secs % 60);
++}
++
++static void row_set(int idx, const char* text)
++{
++    if (idx < 0 || idx >= SCREEN_ROWS || s_rows[idx] == NULL) {
++        return;
++    }
++
++    lv_label_set_text(s_rows[idx], text);
++}
++
++static void ui_build(lv_obj_t* scr, int width, int height)
++{
++    int card_h = height * SCREEN_CARD_PCT / 100;
++    int rows_y = SCREEN_BAR_H + SCREEN_GAP + card_h + SCREEN_GAP;
++    int row_h = (height - rows_y - 6) / SCREEN_ROWS;
++    int row_w = width * 92 / 100;
++    int value_w = row_w - 110;
++
++    if (row_h < 24) {
++        row_h = 24;
++    }
++
++    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
++    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
++    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
++    lv_obj_set_style_pad_all(scr, 0, 0);
++    lv_obj_set_style_border_width(scr, 0, 0);
++
++    /* Status bar: link dot, who we are, how long we have been up. */
++
++    lv_obj_t* bar = lv_obj_create(scr);
++    lv_obj_set_size(bar, width, SCREEN_BAR_H);
++    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
++    lv_obj_set_style_bg_color(bar, lv_color_hex(COL_BG), 0);
++    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
++    lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
++    lv_obj_set_style_border_width(bar, 1, 0);
++    lv_obj_set_style_border_color(bar, lv_color_hex(COL_RULE), 0);
++    lv_obj_set_style_radius(bar, 0, 0);
++    lv_obj_set_style_pad_all(bar, 0, 0);
++    lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
++
++    s_dot = lv_obj_create(bar);
++    lv_obj_set_size(s_dot, 12, 12);
++    lv_obj_align(s_dot, LV_ALIGN_LEFT_MID, 16, 0);
++    lv_obj_set_style_radius(s_dot, LV_RADIUS_CIRCLE, 0);
++    lv_obj_set_style_bg_color(s_dot, lv_color_hex(COL_DIM), 0);
++    lv_obj_set_style_bg_opa(s_dot, LV_OPA_COVER, 0);
++    lv_obj_set_style_border_width(s_dot, 0, 0);
++
++    lv_obj_t* title = make_label(bar, "TinyMind 主控", s_font_md,
++        lv_color_hex(COL_INK));
++    lv_obj_align(title, LV_ALIGN_LEFT_MID, 38, 0);
++
++    s_uptime = make_label(bar, "--:--:--", s_font_sm, lv_color_hex(COL_DIM));
++    lv_obj_align(s_uptime, LV_ALIGN_RIGHT_MID, -16, 0);
++
++    /* The announcement: the biggest type on the panel, because it is the one
++     * thing the camera has to read. */
++
++    lv_obj_t* card = lv_obj_create(scr);
++    lv_obj_set_size(card, row_w, card_h);
++    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, SCREEN_BAR_H + SCREEN_GAP);
++    lv_obj_set_style_bg_color(card, lv_color_hex(COL_CARD), 0);
++    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
++    lv_obj_set_style_radius(card, 16, 0);
++    lv_obj_set_style_border_width(card, 0, 0);
++    lv_obj_set_style_pad_all(card, 14, 0);
++    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
++
++    s_body = make_label(card, "就绪", s_font, lv_color_hex(COL_INK));
++    lv_label_set_long_mode(s_body, LV_LABEL_LONG_WRAP);
++    lv_obj_set_width(s_body, lv_pct(100));
++    lv_obj_set_style_text_align(s_body, LV_TEXT_ALIGN_CENTER, 0);
++    lv_obj_set_style_text_line_space(s_body, 6, 0);
++    lv_obj_align(s_body, LV_ALIGN_CENTER, 0, 0);
++
++    /* The rows. */
++
++    for (int i = 0; i < SCREEN_ROWS; i++) {
++        lv_obj_t* row = make_row(scr, kRowNames[i], row_w, row_h);
++        lv_obj_align(row, LV_ALIGN_TOP_MID, 0, rows_y + i * row_h);
++
++        s_rows[i] = make_label(row, "--", s_font_sm, lv_color_hex(COL_INK));
++        lv_obj_set_width(s_rows[i], value_w);
++        lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_RIGHT, 0);
++        lv_obj_align(s_rows[i], LV_ALIGN_RIGHT_MID, -4, 0);
++    }
++
++    row_set(ROW_PROMPT, "还没有收到指令");
++    row_set(ROW_LINK, "等待网关");
++    row_set(ROW_MODEL, "未配置");
++    row_set(ROW_CLIP, "还没有播报");
++    row_set(ROW_CALLS, "0 次");
++
++    lv_screen_load(scr);
++}
++
++/* Re-read everything that is not pushed by a caller.  Runs in the LVGL thread
++ * (LVGL is single-threaded), once a second. */
++
++static void status_tick(lv_timer_t* timer)
++{
++    char ip[20];
++    char ifname[12];
++    char peer[20];
++    char line[SCREEN_ROW_MAX];
++    char up[20];
++
++    (void)timer;
++
++    uptime_text(up, sizeof(up));
++    lv_label_set_text(s_uptime, up);
++
++    bool linked = link_reading(ip, sizeof(ip), ifname, sizeof(ifname), peer,
++        sizeof(peer));
++
++    /* Log only on change: this line is how the bring-up is verified over the
++     * serial console, and a line a second would drown the console. */
++
++    static bool was_linked = false;
++    static bool first = true;
++
++    if (first || linked != was_linked) {
++        first = false;
++        was_linked = linked;
++        if (linked) {
++            syslog(LOG_INFO, "[%s] link up: %s %s%s%s\n", TAG, ifname, ip,
++                peer[0] ? " -> " : "", peer);
++        } else {
++            syslog(LOG_WARNING, "[%s] link down: no address yet\n", TAG);
++        }
++    }
++
++    if (linked) {
++        snprintf(line, sizeof(line), "已连接 %s", ip);
++        row_set(ROW_LINK, line);
++        lv_obj_set_style_bg_color(s_dot, lv_color_hex(COL_OK), 0);
++    } else {
++        row_set(ROW_LINK, "未连接，等 PPP 拨号");
++        lv_obj_set_style_bg_color(s_dot, lv_color_hex(COL_BAD), 0);
++    }
++
++    /* Where the board's requests go, and how many it has made.  Both come
++     * from the router, so this row is "what the board is actually using",
++     * not what it was configured with at build time. */
++
++    llm_backend_t be;
++    static char last_model[SCREEN_ROW_MAX];
++    static unsigned last_calls = 0xffffffffu;
++
++    if (llm_router_get_backend(0, &be) == 0) {
++        /* 精度是显式的：host/model 都是 64/128 字节的数组，直接 "%s" 会被
++         * -Werror=format-truncation 拦下来（板子上的行宽也放不下那么长）。 */
++        if (be.host[0] != '\0' && be.model[0] != '\0') {
++            snprintf(line, sizeof(line), "%.24s @ %.40s", be.model, be.host);
++        } else {
++            snprintf(line, sizeof(line), "%.40s", be.model[0] ? be.model : "未配置");
++        }
++
++        if (strcmp(line, last_model) != 0) {
++            snprintf(last_model, sizeof(last_model), "%s", line);
++            row_set(ROW_MODEL, line);
++            syslog(LOG_INFO, "[%s] routed model: %s\n", TAG, line);
++        }
++
++        if (be.total_calls != last_calls) {
++            last_calls = be.total_calls;
++            snprintf(line, sizeof(line), "%u 次", (unsigned)be.total_calls);
++            row_set(ROW_CALLS, line);
++        }
++    } else {
++        row_set(ROW_MODEL, "未配置");
++    }
++}
++
++/* Bring-up + the LVGL loop, all in one thread. */
++
++static void* screen_task(void* arg)
++{
++    const char* fb = s_fb_path;
++    const char* input = s_input_path;
++    lv_nuttx_dsc_t info;
++    lv_nuttx_result_t result;
++    int waited = 0;
++
++    (void)arg;
++
++    while (waited < SCREEN_WAIT_MS) {
++        if ((!fb || access(fb, F_OK) == 0) && (!input || access(input, F_OK) == 0)) {
++            break;
++        }
++
++        usleep(500 * 1000);
++        waited += 500;
++    }
++
++    if (fb && access(fb, F_OK) != 0) {
++        syslog(LOG_WARNING, "[%s] %s never appeared (waited %d ms): no screen\n",
++            TAG, fb, waited);
++        return NULL;
++    }
++
++    lv_init();
++    lv_nuttx_dsc_init(&info);
++
++    if (fb) {
++        info.fb_path = fb;
++    }
++
++    if (input) {
++        info.input_path = input;
++    }
++
++    lv_nuttx_init(&info, &result);
++    if (result.disp == NULL) {
++        syslog(LOG_WARNING, "[%s] no display on %s\n", TAG, fb ? fb : "(default)");
++        return NULL;
++    }
++
++    font_setup();
++
++    lv_obj_t* scr = lv_obj_create(NULL);
++    int width = lv_display_get_horizontal_resolution(result.disp);
++    int height = lv_display_get_vertical_resolution(result.disp);
++    syslog(LOG_INFO, "[%s] panel %dx%d\n", TAG, width, height);
++    ui_build(scr, width, height);
++
++    lv_timer_create(status_tick, SCREEN_TICK_MS, NULL);
++    status_tick(NULL); /* fill the rows before the first second is up */
++
++    backlight_set(100);
++    syslog(LOG_INFO, "[%s] backlight on (%s)\n", TAG, SCREEN_BL_DEV);
++
++    s_running = true;
++    syslog(LOG_INFO, "[%s] up: %s\n", TAG, fb ? fb : "(default)");
++
++    uint32_t last_bl = 0;
++    uint32_t elapsed = 0;
++
++    while (s_running) {
++        char body[SCREEN_TEXT_MAX];
++        char prompt[SCREEN_ROW_MAX];
++        char clip[SCREEN_ROW_MAX];
++        char count[SCREEN_ROW_MAX];
++        bool have_body = false;
++        bool have_prompt = false;
++        bool have_clip = false;
++
++        pthread_mutex_lock(&s_lock);
++        if (s_body_waiting) {
++            memcpy(body, s_body_text, sizeof(body));
++            s_body_waiting = false;
++            have_body = true;
++        }
++        if (s_prompt_waiting) {
++            snprintf(prompt, sizeof(prompt), "%s", s_prompt);
++            s_prompt_waiting = false;
++            have_prompt = true;
++        }
++        if (s_clip_waiting) {
++            snprintf(clip, sizeof(clip), "%s", s_clip);
++            s_clip_waiting = false;
++            have_clip = true;
++        }
++        snprintf(count, sizeof(count), "%u 次", s_cmds);
++        pthread_mutex_unlock(&s_lock);
++        if (have_body && s_body) {
++            lv_label_set_text(s_body, body);
++            syslog(LOG_INFO, "[%s] show: %.60s\n", TAG, body);
++        }
++
++        if (have_prompt) {
++            row_set(ROW_PROMPT, prompt);
++            row_set(ROW_CALLS, count);
++        }
++
++        if (have_clip) {
++            row_set(ROW_CLIP, clip[0] ? clip : "还没有播报");
++        }
++
++        uint32_t idle = lv_timer_handler();
++        usleep((idle > 0 && idle < 100 ? idle : 10) * 1000);
++
++        /* Re-assert the backlight every few seconds. */
++
++        elapsed += idle > 0 ? idle : 10;
++        if (elapsed - last_bl >= SCREEN_BL_REASSERT_MS) {
++            last_bl = elapsed;
++            backlight_set(100);
++        }
++    }
++
++    return NULL;
++}
++
++int agent_screen_init(const char* fb_path, const char* input_path)
++{
++    pthread_attr_t attr;
++
++    if (s_inited) {
++        return OK;
++    }
++
++    s_inited = true;
++
++    if (fb_path) {
++        strncpy(s_fb_path, fb_path, sizeof(s_fb_path) - 1);
++    }
++
++    if (input_path) {
++        strncpy(s_input_path, input_path, sizeof(s_input_path) - 1);
++    }
++
++    strncpy(s_font_path, AGENT_SCREEN_FONT_PATH, sizeof(s_font_path) - 1);
++
++    pthread_attr_init(&attr);
++    pthread_attr_setstacksize(&attr, SCREEN_TASK_STACK);
++
++    if (pthread_create(&s_task, &attr, screen_task, NULL) != 0) {
++        syslog(LOG_ERR, "[%s] bring-up thread create failed\n", TAG);
++        pthread_attr_destroy(&attr);
++        return -EIO;
++    }
++
++    pthread_attr_destroy(&attr);
++    return OK;
++}
++
++void agent_screen_show(const char* text)
++{
++    if (!s_running || !text || !text[0]) {
++        return;
++    }
++
++    pthread_mutex_lock(&s_lock);
++    strncpy(s_body_text, text, sizeof(s_body_text) - 1);
++    s_body_text[sizeof(s_body_text) - 1] = '\0';
++    s_body_waiting = true;
++    pthread_mutex_unlock(&s_lock);
++}
++
++/* The command the user just gave.  This is the row that makes the panel
++ * self-explanatory on video: the viewer sees "打开RGB" go in and
++ * "RGB灯已打开" come out. */
++
++void agent_screen_set_prompt(const char* text)
++{
++    if (!s_running || !text || !text[0]) {
++        return;
++    }
++
++    pthread_mutex_lock(&s_lock);
++    strncpy(s_prompt, text, sizeof(s_prompt) - 1);
++    s_prompt[sizeof(s_prompt) - 1] = '\0';
++    s_prompt_waiting = true;
++    s_cmds++;
++    pthread_mutex_unlock(&s_lock);
++}
++
++/* The offline announcement that just played, by its clip name.  Shows the
++ * audio half of the demo as machine state rather than as a claim. */
++
++void agent_screen_set_clip(const char* name)
++{
++    if (!s_running) {
++        return;
++    }
++
++    pthread_mutex_lock(&s_lock);
++    if (name && name[0]) {
++        snprintf(s_clip, sizeof(s_clip), "离线片段 %s", name);
++    } else {
++        s_clip[0] = '\0';
++    }
++    s_clip_waiting = true;
++    pthread_mutex_unlock(&s_lock);
++}
++
++#else /* !CONFIG_GRAPHICS_LVGL */
++
++/* Built without LVGL: nothing to draw on, and the callers stay unchanged. */
++
++static const char* TAG = "screen";
++
++int agent_screen_init(const char* fb_path, const char* input_path)
++{
++    (void)fb_path;
++    (void)input_path;
++    syslog(LOG_INFO, "[%s] LVGL not enabled: no status screen\n", TAG);
++    return -ENODEV;
++}
++
++void agent_screen_show(const char* text)
++{
++    (void)text;
++}
++
++void agent_screen_set_prompt(const char* text)
++{
++    (void)text;
++}
++
++void agent_screen_set_clip(const char* name)
++{
++    (void)name;
++}
++
++#endif /* CONFIG_GRAPHICS_LVGL */
+--- /dev/null
++++ b/packages/ai_agent/include/ui/agent_screen.h
+@@ -0,0 +1,54 @@
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Minimal agent status screen.
++ *
++ * The upstream LVGL chat channel (lvgl_ui_channel.c) assumes a 466x466 round
++ * watch panel, a Vela/FreeType CJK font service and a system that already
++ * owns LVGL.  A bare devkit board has none of those, so this brings up LVGL
++ * the way apps/examples/lvgldemo does and draws the board's own status page.
++ *
++ * Everything on it is a reading, not decoration: the link row comes from
++ * getifaddrs(), the model and call count from the LLM router, the last
++ * command and the last announcement from the callers below.
++ *
++ * init returns OK, or a negative errno when there is no display to drive
++ * (in which case the setters are no-ops). */
++
++int agent_screen_init(const char* fb_path, const char* input_path);
++
++/* Replace the announcement text -- the big line in the middle of the panel.
++ * Safe to call from any thread; the label is updated by the LVGL task. */
++
++void agent_screen_show(const char* text);
++
++/* Note the command the user just gave (the "最近指令" row), and count it. */
++
++void agent_screen_set_prompt(const char* text);
++
++/* Note the offline announcement that just played, by its clip name. */
++
++void agent_screen_set_clip(const char* name);
++
++#ifdef __cplusplus
++}
++#endif
+--- a/packages/ai_agent/src/voice/voice_say.c
++++ b/packages/ai_agent/src/voice/voice_say.c
+@@ -30,6 +30,7 @@
+ #include "agent_compat.h"
+ #include "agent_config.h"
+ #include "infra/config_store.h"
++#include "ui/agent_screen.h"
+ #include "voice/audio_playback.h"
+ #include "voice/mimo_tts.h"
+ #include "voice/voice_tts.h"
+@@ -173,6 +174,9 @@
+         return -ENOENT;
+     }
+ 
++    /* 屏上"播报"行显示的就是这个名字：演示时画面里有声音、也有出处。 */
++    agent_screen_set_clip(name);
++
+     pthread_mutex_lock(&s_lock);
+ 
+     pb = audio_playback_open(playback_dev(), AGENT_VOICE_SAMPLE_RATE,
+@@ -322,6 +326,18 @@
+     { "色温已调到", "ct_set" },
+     { "没有回应", "no_reply" },
+     { "没有找到这台设备", "no_device" },
++    /* 板载 RGB 灯（S3 上那颗 WS2812）：颜色名 + "灯"。关灯只有一颗灯，
++     * 所以统一说 RGB 灯；带次数的（"红灯闪了 3 下"）和呼吸各用一句通用
++     * 播报，屏上仍是精确句。 */
++    { "RGB灯已打开", "rgb_on" },
++    { "RGB灯已关闭", "rgb_off" },
++    { "红灯已打开", "red_on" },
++    { "蓝灯已打开", "blue_on" },
++    { "绿灯已打开", "green_on" },
++    { "白灯已打开", "white_on" },
++    { "黄灯已打开", "yellow_on" },
++    { "闪了", "led_blink" },
++    { "已进入呼吸模式", "led_breath" },
+     { "已切换", "ok" },
+     { "状态正常", "ok" },
+     { "状态已读回", "ok" },
+--- a/packages/ai_agent/src/channels/nsh_commands.c
++++ b/packages/ai_agent/src/channels/nsh_commands.c
+@@ -595,6 +595,7 @@
+     msg.content = strdup(content);
+     if (msg.content)
+         message_bus_push_inbound(&msg);
++    agent_screen_set_prompt(content); /* 屏上"最近指令"行 */
+     printf("Sent to agent: %s\n", content);
+     syslog(LOG_INFO, "[agent] ask: %s\n", content);
+ }

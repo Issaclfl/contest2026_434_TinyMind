@@ -46,6 +46,17 @@ CLIPS = [
     ("ct_set",     "台灯色温已调好"),
     ("no_reply",   "设备没有回应"),
     ("no_device",  "没有找到这台设备"),
+
+    # 板载 RGB 灯（S3 上那颗 WS2812）的答复：同样由网关本地生成。
+    # 闪 N 下、呼吸这类带次数的句子走 led_blink / led_breath 两句通用播报，
+    # 屏上仍是精确句（"红灯闪了 3 下"）。
+    ("green_on",   "绿灯已打开"),
+    ("white_on",   "白灯已打开"),
+    ("yellow_on",  "黄灯已打开"),
+    ("rgb_on",     "RGB灯已打开"),
+    ("rgb_off",    "RGB灯已关闭"),
+    ("led_blink",  "灯已闪烁"),
+    ("led_breath", "灯已进入呼吸模式"),
 ]
 
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else "."

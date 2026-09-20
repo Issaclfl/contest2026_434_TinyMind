@@ -253,7 +253,8 @@ def strip_ansi(text):
 
 
 # 板子在思考时会先念一句提示语，那不是答案。
-THINKING_PHRASES = ("让我查一下", "稍等，处理中", "正在分析", "正在思考")
+# 与板子 agent_loop.c 的 s_working_phrases 保持一致（5 句全列），否则面板会把状态语当成答复（实测"马上好..."中过招）
+THINKING_PHRASES = ("让我查一下", "稍等，处理中", "正在分析", "正在思考", "马上好", "正在思考中")
 
 AGENT_LINE = re.compile(r"\[Agent\]:\s*([^\n]*)")
 

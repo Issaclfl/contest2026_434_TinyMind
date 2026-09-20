@@ -172,6 +172,10 @@ typedef struct { const char *name; int r, g, b; } led_color_t;
 static const led_color_t kColors[] = {
     { "red",    24,  0,  0 }, { "green",  0, 24,  0 }, { "blue",   0,  0, 24 },
     { "white",  16, 16, 16 }, { "yellow", 20, 20,  0 }, { "off",    0,  0,  0 },
+    /* "rgb" 与 white 是同一个亮度：板载就一颗 WS2812，RGB 是它的名字。
+     * 单独留一个名字是为了让回复能说"RGB灯已打开"而不是"白灯已打开"——
+     * 用户说 RGB 听得见的回话也该是 RGB。 */
+    { "rgb",    16, 16, 16 },
 };
 
 static const led_color_t *color_rgb(const char *name)
@@ -245,6 +249,77 @@ static const char *led_apply(const char *color, const char *effect, int times)
 #else
     return "led disabled at build time";
 #endif
+}
+
+/* 颜色 + 特效的中文说法：说给用户听的那一句要用它，屏上显示的也是它。
+ * "off" 没有颜色——板载只有一颗灯，关的就是它。 */
+static const char *led_color_zh(const char *color)
+{
+    if (color == NULL) {
+        return "灯";
+    }
+    if (strcmp(color, "red") == 0) return "红灯";
+    if (strcmp(color, "green") == 0) return "绿灯";
+    if (strcmp(color, "blue") == 0) return "蓝灯";
+    if (strcmp(color, "white") == 0) return "白灯";
+    if (strcmp(color, "yellow") == 0) return "黄灯";
+    if (strcmp(color, "rgb") == 0) return "RGB灯";
+    return "灯";
+}
+
+/* 中文口令这条路的入口：分类器已经把颜色/特效/次数说清楚了，这里只负责执行
+ * 和翻译，**不经过生成式小模型**（那个是英文语料训的，中文进去只会瞎猜）。
+ *
+ * out 是机器可读的 JSON（与英文那条路同一个形状），zh 是要说给用户听的中文。
+ * 返回 0 表示动作真的做成了；"unknown colour"、驱动不在线这些如实算失败。 */
+int cmd_exec_led(const char *color, const char *effect, int times,
+    char *out, size_t out_size, char *zh, size_t zh_size)
+{
+    if (color == NULL || color[0] == '\0') {
+        snprintf(out, out_size, "{\"action\":\"led\",\"error\":\"no colour given\"}");
+        if (zh != NULL && zh_size > 0) {
+            snprintf(zh, zh_size, "没有说要哪个颜色");
+        }
+        return -1;
+    }
+
+    const char *res = led_apply(color, effect, times);
+    bool ok = (strcmp(res, "led set") == 0) || (strcmp(res, "led blinked") == 0) ||
+              (strcmp(res, "led breathed") == 0);
+
+    if (effect != NULL && effect[0] != '\0' && times > 1) {
+        snprintf(out, out_size,
+                 "{\"action\":\"led\",\"color\":\"%s\",\"effect\":\"%s\",\"times\":%d,"
+                 "\"result\":\"%s\"}", color, effect, times, res);
+    } else if (effect != NULL && effect[0] != '\0') {
+        snprintf(out, out_size,
+                 "{\"action\":\"led\",\"color\":\"%s\",\"effect\":\"%s\",\"result\":\"%s\"}",
+                 color, effect, res);
+    } else {
+        snprintf(out, out_size,
+                 "{\"action\":\"led\",\"color\":\"%s\",\"result\":\"%s\"}", color, res);
+    }
+
+    if (zh != NULL && zh_size > 0) {
+        const char *name = led_color_zh(color);
+        if (!ok) {
+            snprintf(zh, zh_size, "%s没有响应", name);
+        } else if (strcmp(color, "off") == 0) {
+            snprintf(zh, zh_size, "RGB灯已关闭");
+        } else if (effect != NULL && strcmp(effect, "blink") == 0) {
+            /* 次数不预合成片段（16 个数字不值得占 flash）：屏上是精确句，
+             * 喇叭播报用"灯已闪烁"这句通用片段。 */
+            snprintf(zh, zh_size, "%s闪了 %d 下", name, times > 0 ? times : 1);
+        } else if (effect != NULL && strcmp(effect, "breath") == 0) {
+            snprintf(zh, zh_size, "%s已进入呼吸模式", name);
+        } else {
+            snprintf(zh, zh_size, "%s已打开", name);
+        }
+    }
+
+    ESP_LOGI(TAG, "led(clf) %s %s%s -> %s", color,
+             effect != NULL ? effect : "", times > 1 ? " xN" : "", res);
+    return ok ? 0 : -1;
 }
 
 /* ---- 芯片温度：ESP32-S3 片内温度传感器（真读数，不是猜） ------------------ */

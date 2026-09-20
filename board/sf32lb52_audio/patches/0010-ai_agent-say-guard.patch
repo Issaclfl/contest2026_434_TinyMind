@@ -1,0 +1,110 @@
+第 10 批：修"ask 之后屏和喇叭长时间没反应"的根因。依赖：0005、0006、0007、0008、0009。
+
+状态语（"让我查一下..."等 5 句）此前会走云端 TTS；板上 key 是 set_llm 的占位值，
+3 次带 TLS 握手的重试把**串行的出站派发线程**卡住几十秒，真正的答复排在后面出不来
+（真机实测：一条 ask 后几十秒无答复，日志停在 mimo_tts attempt 1/2/3）。两处改动：
+① 状态语只上屏、不合成（agent_loop 导出 agent_loop_is_working_phrase，agent_main 跳过）；
+② 明显的占位 key（local/test/changeme…）直接判云端 TTS 不可用，不再撞墙。
+
+--- a/packages/ai_agent/src/core/agent_loop.h
++++ b/packages/ai_agent/src/core/agent_loop.h
+@@ -31,6 +31,10 @@
+ int agent_loop_init(void);
+ int agent_loop_start(void);
+ 
++/* 这句话是不是"思考中"那类状态语？状态语可以上屏，但不该送去合成语音：
++ * 云端 TTS 一旦慢或失败，派发线程会被它拖住（见 agent_main.c 的用法）。 */
++bool agent_loop_is_working_phrase(const char* text);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/packages/ai_agent/src/core/agent_loop.c
++++ b/packages/ai_agent/src/core/agent_loop.c
+@@ -884,6 +884,21 @@
+ #define WORKING_PHRASE_COUNT \
+     ((int)(sizeof(s_working_phrases) / sizeof(s_working_phrases[0])))
+ 
++bool agent_loop_is_working_phrase(const char* text)
++{
++    if (text == NULL) {
++        return false;
++    }
++
++    for (int i = 0; i < WORKING_PHRASE_COUNT; i++) {
++        if (strcmp(text, s_working_phrases[i]) == 0) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
+ /* Send a "working" status message on the first iteration.
+  * Skip for feishu (has its own typing indicator) and voice
+  * (TTS synthesis of a status phrase wastes time and memory). */
+--- a/packages/ai_agent/src/agent_main.c
++++ b/packages/ai_agent/src/agent_main.c
+@@ -460,8 +460,15 @@
+             if (action_announce(msg.content) != 0) {
+                 agent_screen_show(msg.content);
+ 
+-                if (voice_say_get_auto()) {
++                /* 状态语（"让我查一下..."）只上屏、不进语音：它不在离线片段
++                 * 表里，会去撞云端 TTS，而这条线程是**串行派发**的——一卡就
++                 * 把真正的答复堵在后面（实测堵了几十秒）。 */
++                if (voice_say_get_auto()
++                    && !agent_loop_is_working_phrase(msg.content)) {
+                     say_now(msg.content);
++                } else if (agent_loop_is_working_phrase(msg.content)) {
++                    syslog(LOG_INFO, "[%s] status phrase, not spoken: %s\n", TAG,
++                        msg.content);
+                 }
+             }
+         } else {
+--- a/packages/ai_agent/src/voice/mimo_tts.c
++++ b/packages/ai_agent/src/voice/mimo_tts.c
+@@ -72,6 +72,27 @@
+ 
+ /* ------------------------------------------------------------------ */
+ 
++/* 明显的占位值：这些不该换来三次失败握手。 */
++static bool mimo_tts_key_is_placeholder(const char* key)
++{
++    static const char* const placeholders[] = {
++        "local",
++        "none",
++        "placeholder",
++        "test",
++        "changeme",
++        "your-api-key",
++    };
++
++    for (size_t i = 0; i < sizeof(placeholders) / sizeof(placeholders[0]); i++) {
++        if (strcasecmp(key, placeholders[i]) == 0) {
++            return true;
++        }
++    }
++
++    return false;
++}
++
+ static int mimo_tts_init(void)
+ {
+     memset(s_api_key, 0, sizeof(s_api_key));
+@@ -79,6 +100,15 @@
+ 
+     claw_config_get(AGENT_CFG_KEY_API_KEY, s_api_key, sizeof(s_api_key));
+ 
++    /* 占位 key（演示时 set_llm 的第三个参数常常就是 "local"）：请求发出去也
++     * 只会失败，而失败路径上有 3 次 TLS 握手，足够把派发线程拖住。宁可现在
++     * 就当没配置——语音这条腿本来也没打通（见证据文档 §8.5）。 */
++    if (s_api_key[0] != '\0' && mimo_tts_key_is_placeholder(s_api_key)) {
++        syslog(LOG_WARNING, "[%s] api key is a placeholder: cloud TTS disabled\n",
++            TAG);
++        memset(s_api_key, 0, sizeof(s_api_key));
++    }
++
+     if (claw_config_get(AGENT_CFG_KEY_TTS_VOICE, s_voice, sizeof(s_voice))
+             != OK
+         || s_voice[0] == '\0') {

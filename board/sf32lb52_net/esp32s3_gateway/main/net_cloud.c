@@ -358,6 +358,30 @@ static esp_err_t route(const char *body, size_t body_len, char **response)
                 net_miio_zh(line, raw, zh, sizeof(zh));
                 snprintf(answer, sizeof(answer), "%s", zh);
                 ESP_LOGI(TAG, "cmd->clf->miio: %s => %s", label, answer);
+            } else if (jact != NULL && cJSON_IsString(jact) &&
+                       strcmp(jact->valuestring, "led") == 0) {
+                /* 板载 RGB 灯（"打开RGB" / "红灯闪三下"）：分类器已经把颜色、
+                 * 特效、次数说清楚了，直接执行，不再让生成式小模型去猜 ——
+                 * 那个模型是英文语料训的，中文进去只会瞎猜（这正是"打开RGB"
+                 * 一度被当成开台灯的原因）。 */
+                char color[24] = { 0 };
+                char effect[16] = { 0 };
+                int times = 1;
+                char raw[256];
+                cJSON *j = cJSON_GetObjectItem(doc, "color");
+                if (j != NULL && cJSON_IsString(j)) {
+                    snprintf(color, sizeof(color), "%s", j->valuestring);
+                }
+                j = cJSON_GetObjectItem(doc, "effect");
+                if (j != NULL && cJSON_IsString(j)) {
+                    snprintf(effect, sizeof(effect), "%s", j->valuestring);
+                }
+                j = cJSON_GetObjectItem(doc, "times");
+                if (j != NULL && cJSON_IsNumber(j)) {
+                    times = (int)j->valuedouble;
+                }
+                cmd_exec_led(color, effect, times, raw, sizeof(raw), answer, sizeof(answer));
+                ESP_LOGI(TAG, "cmd->clf->led: %s => %s", label, answer);
             } else if (cmd_exec_run(text, answer, sizeof(answer)) != 0) {
                 ESP_LOGW(TAG, "cmd failed: %s", answer);
             }

@@ -47,6 +47,13 @@ nuttx_add_romfs(
   etc/clips/ct_set.pcm
   etc/clips/no_reply.pcm
   etc/clips/no_device.pcm
+  etc/clips/green_on.pcm
+  etc/clips/white_on.pcm
+  etc/clips/yellow_on.pcm
+  etc/clips/rgb_on.pcm
+  etc/clips/rgb_off.pcm
+  etc/clips/led_blink.pcm
+  etc/clips/led_breath.pcm
   etc/fonts/NotoSansSC-sub.ttf   # tools/subset_font.py 生成
   PATH
   ${CMAKE_CURRENT_LIST_DIR}/etc)
