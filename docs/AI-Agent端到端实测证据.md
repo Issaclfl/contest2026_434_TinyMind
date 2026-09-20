@@ -191,3 +191,46 @@ nsh> ai_agent
 vela> set_llm https://token-plan-cn.xiaomimimo.com/v1 mimo-v2.5-pro <api_key>
 vela> ask 你好，用一句话介绍一下你自己
 ```
+
+## 七、2026-09-20 补充：在线 TTS —— 云端契约在 PC 侧验证、板上链路的实测边界
+
+**背景**：板上调 MiMo 的 TTS（`mimo-v2.5-tts`，走 `/v1/chat/completions`，
+见 `packages/ai_agent/src/voice/mimo_tts.c`）在真机上反复拿不到音频，
+板上日志是：
+
+```
+[mimo_tts] attempt 1: HTTP 200, 20196 bytes, no audio
+```
+
+量级对不上，所以做了一次**对拍**：PC 用与板上 `build_body()` **逐字节相同**的请求
+打同一个端点（工具已入库：`board/sf32lb52_audio/tools/tts_probe_pc.py`，
+key 只从被 gitignore 的 `sdkconfig` 读、不打印，响应只落系统临时目录）。
+
+| 指标 | PC 侧实测 | 板上实测 |
+|---|---|---|
+| HTTP 状态 | 200 | 200 |
+| 响应体大小 | **113,187 字节** | **20,196 字节** |
+| JSON 是否完整 | 是（`json.loads` 通过，以 `}` 收尾） | 否（在 ~20 KB 处断） |
+| `choices[0].message.audio.data` | 112,700 个 base64 字符 | 无 |
+| 解出的音频 | 84,524 字节 WAV：**24 kHz / 单声道 / 16-bit，约 1.8 s** | — |
+
+**结论（如实记录）**
+
+1. **云端 TTS 契约是正确的**，返回的是真实可播音频（PC 侧已解出 WAV 并核对头字段）。
+2. **板子这条链路在 ~20 KB 处停住**。排除两个嫌疑：不是我们的接收缓冲
+   （`MIMO_TTS_RESP_CAP` 是 768 KB，`mimo_tts.c:64`），也不是 API——
+   同一个请求在 PC 侧 113 KB 完整返回。**剩下的是链路本身**。
+3. 一句话 1.8 秒就要 113 KB ⇒ 想用"把句子切短"塞进 20 KB 以内，得切到 0.3 秒一句，
+   不可用。因此线上播报记为：**云端契约已验证、板上链路未打通**。
+4. 语音播报这条路，演示走**本地离线片段**（`/etc/clips/*.pcm`，romfs 随固件，
+   零网络依赖），该路径已真机验证（`overruns=0`）。
+5. 期间试过一次把板子 PPP 的 `CONFIG_NET_TUN_PKTSIZE` 从 1500 调到 1280（怀疑大包被
+   黑洞），但那次测试时 `ppp0` 处于 DOWN、回包为 0 字节，**结果不可解释**；
+   该改动已回滚，仓库与文档都保持 1500。
+
+**复现**
+
+```bash
+# PC（Windows），默认从网关 sdkconfig 读 key
+python board/sf32lb52_audio/tools/tts_probe_pc.py "你好，我是 TinyMind"
+```
