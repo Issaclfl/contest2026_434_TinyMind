@@ -840,3 +840,55 @@ localhost）。http 页面上 `navigator.mediaDevices` 这个对象根本不存�
 会返回 `{"error":""}`。现在改成 `the recording held no speech (silence or a tone)`，
 把"听清了但没听到话"和"识别失败"分开说。
 
+
+## 米家 miIO 链路（2026-09-20，软件层验证，未上板）
+
+**背景**：要让板子控制米家设备，S3 侧新增 miIO/MIoT 局域网客户端（`main/net_miio.c`）。
+手上没有真台灯，而 python-miio 0.5.12 已经移除了官方模拟器（`devtools miio-simulator`
+跑不起来），所以用两层办法先把协议钉死，再留给上板半步。
+
+### 一、报文格式与参考实现逐字段对拍（`pc_side/miio_protocol_check.py`）
+
+裁判是 python-miio 的 `miio/protocol.py` —— 报文格式的事实标准（真机认它，社区工具也认它）。
+
+| 核对项 | 结果 |
+|---|---|
+| magic / 大端 length / 16 字节头 + 32 偏移 | 一致（`2131`、length=96、总长 96） |
+| **checksum 按什么算** | **按密文**：按密文重算 = 参考实现的值；按明文重算不匹配 |
+| key=MD5(token)、iv=MD5(key+token) | 双向互解成功 |
+| PKCS7 填充、JSON 末尾补 `0` | 一致（明文语义相同；空格差异不影响） |
+| 我组出来的包 → 参考实现解析 | 成功，解出原始对象 |
+| 参考实现的包 → 我的解析 | 成功，解出原始对象 |
+
+结论：**`net_miio.c` 的报文布局与参考实现一致**。"checksum 按密文算"这条如果不做对拍，
+很容易想当然写成按明文，真机就会不认——这次对拍直接把它定下来了。
+
+### 二、被控端：自写的最小 miIO 设备模拟器（`pc_side/miio_device_sim.py`）
+
+UDP 54321，实现 hello 握手（32 字节包回 token）与 `miIO.info` / `get_prop` / `set_power` /
+`toggle` / `set_bright` / `set_ct_abx`，并维护台灯状态（power / bright / ct）。
+
+用 **python-miio 自己的客户端**驱动它，等于让参考实现来确认它是一台"标准 miIO 设备"：
+
+```
+info()                          -> yeelink.light.color3 v1.0.0 (AA:BB:CC:DD:EE:FF)
+set_power on                    -> [ok]        模拟器侧 power=on
+set_bright 70                   -> [ok]        模拟器侧 bright=70
+get_prop [power,bright,ct]      -> [on, 70, 4000]      ← 状态回读
+toggle                          -> [ok]        模拟器侧 power=off
+```
+
+**诚实标注**：这是**模拟设备**——协议是真的，状态机是假的。换真设备的做法是把 S3 设备表
+里的 IP 与 token 换掉（`tools/set_miio.py`），代码不用动；**真机迁移尚未验证**。
+
+### 三、复现时会遇到的 Windows 坑（记下来省得再查）
+
+Windows 会把对端 UDP 的 ICMP 端口不可达报成 `recvfrom` 上的 `WinError 10054`（连接重置），
+参考客户端与自写模拟器都会因此中断。两侧都加 `sock.ioctl(socket.SIO_UDP_CONNRESET, False)`
+即可。ESP32 侧不受影响（lwIP 不做这件事）。
+
+### 四、本阶段**没有**验证的（不写成就绪）
+
+- S3 上板执行 `model:"miio"` 分支：固件已编译通过（1,150,256 B / md5 `8b9a9379`），**未烧写**
+- 手机热点下 PC 与 S3 的互相可达（必需方向是 S3 → PC:54321/udp）
+- 真米家设备（需设备支持"局域网控制" + 取到 token）
